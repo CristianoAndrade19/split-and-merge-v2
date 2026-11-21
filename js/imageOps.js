@@ -457,6 +457,77 @@
   }
 
   /**
+   * Copies plain text to clipboard, with a fallback for non-secure HTTP LAN contexts (e.g. mobile Wi-Fi).
+   * @param {string} text
+   * @returns {Promise<void>}
+   */
+  async function copyTextToClipboard(text) {
+    const val = String(text ?? '');
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(val);
+        return;
+      } catch {
+        // Fallback below
+      }
+    }
+    const ta = document.createElement('textarea');
+    ta.value = val;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, val.length);
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } finally {
+      document.body.removeChild(ta);
+    }
+    if (!ok) {
+      throw new Error('Não foi possível copiar o texto automaticamente neste navegador.');
+    }
+  }
+
+  /**
+   * Shares a PNG via native Mobile Web Share API if supported, falling back to browser PNG download.
+   * @param {HTMLCanvasElement} canvas
+   * @param {string} filename
+   * @returns {Promise<'shared' | 'downloaded' | 'cancelled'>}
+   */
+  function shareOrDownloadCanvas(canvas, filename) {
+    const cleanName = filename.endsWith('.png') ? filename : `${filename}.png`;
+    return new Promise((resolve) => {
+      canvas.toBlob(async (blob) => {
+        if (!blob) {
+          resolve('cancelled');
+          return;
+        }
+        try {
+          if (typeof File !== 'undefined' && navigator.share && navigator.canShare) {
+            const file = new File([blob], cleanName, { type: 'image/png' });
+            if (navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: cleanName });
+              resolve('shared');
+              return;
+            }
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            resolve('cancelled');
+            return;
+          }
+        }
+        downloadCanvasAsPng(canvas, cleanName);
+        resolve('downloaded');
+      }, 'image/png');
+    });
+  }
+
+  /**
    * Downloads an HTMLCanvasElement as a lossless PNG file.
    * @param {HTMLCanvasElement} canvas
    * @param {string} filename
@@ -1322,6 +1393,8 @@
     composeSideBySideCollageCanvas,
     createMaskOverlayCanvas,
     copyCanvasToClipboard,
+    copyTextToClipboard,
+    shareOrDownloadCanvas,
     downloadCanvasAsPng,
     saveCanvasToData,
     getDataFolders,

@@ -582,37 +582,55 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "Endpoint não encontrado."}, status=404)
 
 
-def _find_free_port(start_port: int) -> int:
+def _find_free_port(start_port: int, host: str = "0.0.0.0") -> int:
     for p in range(start_port, start_port + 30):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", p))
+                s.bind((host, p))
                 return p
             except OSError:
                 continue
     raise RuntimeError("Nenhuma porta disponível encontrada.")
 
 
+def _detect_lan_ip() -> Optional[str]:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Servidor WebApp + API FLUX.1")
+    parser.add_argument("--host", default=None, help="Host bind (padrão: 0.0.0.0 no WebApp, 127.0.0.1 em --api-only)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--api-only", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    port = args.port if args.api_only else _find_free_port(args.port)
+    bind_host = args.host if args.host else ("127.0.0.1" if args.api_only else "0.0.0.0")
+    port = args.port if args.api_only else _find_free_port(args.port, bind_host)
     StudioRequestHandler.api_only = args.api_only
-    server = ThreadingHTTPServer(("127.0.0.1", port), StudioRequestHandler)
-    url = f"http://127.0.0.1:{port}/"
+    server = ThreadingHTTPServer((bind_host, port), StudioRequestHandler)
+    local_url = f"http://127.0.0.1:{port}/"
+    lan_ip = _detect_lan_ip() if bind_host in ("0.0.0.0", "") else None
 
     print("=====================================================")
-    print(f"  Split & Merge Studio + FLUX.1 API em: {url}")
-    print(f"  Modo: {'API-Only' if args.api_only else 'WebApp Completo'}")
+    print(f"  Split & Merge Studio + FLUX.1 API")
+    print(f"  Local (PC):      {local_url}")
+    if lan_ip:
+        print(f"  Mobile (Wi-Fi):  http://{lan_ip}:{port}/")
+    print(f"  Modo: {'API-Only' if args.api_only else 'WebApp Completo'} (bind {bind_host})")
     print("  Pressione Ctrl+C para encerrar.")
     print("=====================================================")
 
     if not args.api_only and not args.no_browser:
-        webbrowser.open(url)
+        webbrowser.open(local_url)
 
     try:
         server.serve_forever()

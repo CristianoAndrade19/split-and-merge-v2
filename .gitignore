@@ -1,0 +1,14 @@
+# Segredos / Tokens locais
+.env
+
+# Cache Python e ambientes virtuais
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Dados/imagens geradas localmente
+data/
+
+# Perfil de teste do navegador
+chrome_test_profile_step2/

@@ -260,6 +260,212 @@
   const fileInputFluxRefs = /** @type {HTMLInputElement} */ (document.getElementById('fileInputFluxRefs'));
   const modalAutoSelect = /** @type {HTMLElement} */ (document.getElementById('modalAutoSelect'));
   const toastContainer = /** @type {HTMLElement} */ (document.getElementById('toastContainer'));
+  const sidebarPanel = /** @type {HTMLElement | null} */ (document.getElementById('sidebarPanel'));
+  const sheetHandleBar = /** @type {HTMLElement | null} */ (document.getElementById('sheetHandleBar'));
+  const sheetStepLabel = /** @type {HTMLElement | null} */ (document.getElementById('sheetStepLabel'));
+  const btnSheetPeek = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnSheetPeek'));
+  const btnSheetHalf = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnSheetHalf'));
+  const btnSheetExpand = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnSheetExpand'));
+
+  function isMobileLayout() {
+    return window.matchMedia && window.matchMedia('(max-width: 960px)').matches;
+  }
+
+  function isRemoteClient() {
+    const h = window.location.hostname;
+    return !!h && h !== '127.0.0.1' && h !== 'localhost' && h !== '::1';
+  }
+
+  /** @type {'peek' | 'half' | 'expanded'} */
+  let mobileSheetMode = 'half';
+
+  /**
+   * Controls the mobile bottom sheet snap state ('peek' | 'half' | 'expanded').
+   * @param {'peek' | 'half' | 'expanded'} mode
+   * @param {boolean} [refitCanvas=true]
+   */
+  function setMobileSheetState(mode, refitCanvas = true) {
+    mobileSheetMode = mode;
+    if (!sidebarPanel) return;
+    sidebarPanel.style.height = '';
+    sidebarPanel.classList.remove('dragging');
+    sidebarPanel.setAttribute('data-sheet', mode);
+    btnSheetPeek?.classList.toggle('active', mode === 'peek');
+    btnSheetHalf?.classList.toggle('active', mode === 'half');
+    btnSheetExpand?.classList.toggle('active', mode === 'expanded');
+    if (refitCanvas && isMobileLayout()) {
+      setTimeout(() => {
+        viewport._syncCanvasSize();
+        if (viewport.docW > 0 && viewport.docH > 0) {
+          viewport.fitToViewport();
+        } else {
+          viewport.requestRender();
+        }
+      }, 240);
+    }
+  }
+
+  function initMobileSheet() {
+    if (!sidebarPanel || !sheetHandleBar) return;
+
+    btnSheetPeek?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMobileSheetState('peek');
+    });
+    btnSheetHalf?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMobileSheetState('half');
+    });
+    btnSheetExpand?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMobileSheetState('expanded');
+    });
+
+    let dragging = false;
+    let startY = 0;
+    let startH = 0;
+    let lastY = 0;
+    let moved = false;
+
+    sheetHandleBar.addEventListener('pointerdown', (e) => {
+      if (!isMobileLayout()) return;
+      if (e.target instanceof HTMLElement && e.target.closest('.sheet-snap-btn')) return;
+      dragging = true;
+      moved = false;
+      startY = e.clientY;
+      lastY = e.clientY;
+      startH = sidebarPanel.getBoundingClientRect().height;
+      sidebarPanel.classList.add('dragging');
+      try {
+        sheetHandleBar.setPointerCapture(e.pointerId);
+      } catch {}
+    });
+
+    sheetHandleBar.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dy = startY - e.clientY;
+      if (Math.abs(dy) > 4) moved = true;
+      lastY = e.clientY;
+      const vh = window.innerHeight || 700;
+      const minH = 54;
+      const maxH = Math.round(vh * 0.84);
+      const nextH = Math.max(minH, Math.min(maxH, startH + dy));
+      sidebarPanel.style.height = `${nextH}px`;
+    });
+
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      sidebarPanel.classList.remove('dragging');
+      if (!moved) {
+        // Quick tap on handle cycles Peek -> Half -> Expanded -> Half
+        const next =
+          mobileSheetMode === 'peek'
+            ? 'half'
+            : mobileSheetMode === 'half'
+            ? 'expanded'
+            : 'peek';
+        setMobileSheetState(next);
+        return;
+      }
+      const vh = window.innerHeight || 700;
+      const curH = sidebarPanel.getBoundingClientRect().height;
+      const ratio = curH / vh;
+      const delta = startY - lastY;
+      if (ratio < 0.22 || (delta < -70 && ratio < 0.48)) {
+        setMobileSheetState('peek');
+      } else if (ratio > 0.62 || (delta > 70 && ratio > 0.42)) {
+        setMobileSheetState('expanded');
+      } else {
+        setMobileSheetState('half');
+      }
+    };
+
+    sheetHandleBar.addEventListener('pointerup', endDrag);
+    sheetHandleBar.addEventListener('pointercancel', endDrag);
+
+    let resizeFitTimer = 0;
+    window.addEventListener('resize', () => {
+      if (!isMobileLayout()) {
+        sidebarPanel.style.height = '';
+        sidebarPanel.classList.remove('dragging');
+      }
+      clearTimeout(resizeFitTimer);
+      resizeFitTimer = window.setTimeout(() => {
+        viewport._syncCanvasSize();
+        if (viewport.docW > 0 && viewport.docH > 0) {
+          viewport.fitToViewport();
+        }
+      }, 120);
+    });
+  }
+
+  function handleEmptyCanvasClick() {
+    if (state.activeStep === 1) {
+      fileInputImg1.click();
+    } else if (state.activeStep === 'flux') {
+      if (!state.img1Canvas) {
+        state.activeStep = 1;
+        syncAllUI();
+        fileInputImg1.click();
+      } else if (!state.face1Canvas) {
+        state.activeStep = 1;
+        syncAllUI();
+        showToast('Desenhe o corte ao redor do rosto na Etapa 1.');
+      } else {
+        fileInputFluxRefs?.click();
+      }
+    } else if (state.activeStep === 2) {
+      fileInputImg2.click();
+    } else if (state.activeStep === 4) {
+      fileInputRefined.click();
+    }
+  }
+
+  /**
+   * Binds press-and-hold (or quick tap toggle) A/B flicker for both Touch & Mouse.
+   * @param {HTMLElement | null} el
+   * @param {boolean} [syncToolbar=false]
+   */
+  function bindFlickerControl(el, syncToolbar = false) {
+    if (!el) return;
+    let downTime = 0;
+    let wasActiveOnDown = false;
+    let activePointerId = -1;
+
+    el.addEventListener('pointerdown', (e) => {
+      if (el instanceof HTMLButtonElement && el.disabled) return;
+      e.preventDefault();
+      activePointerId = e.pointerId;
+      downTime = performance.now();
+      wasActiveOnDown = state.flickerActive;
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {}
+      state.flickerActive = true;
+      el.classList.add('flicker-active');
+      syncViewportScene();
+    });
+
+    const release = (e) => {
+      if (activePointerId !== e.pointerId) return;
+      activePointerId = -1;
+      const heldMs = performance.now() - downTime;
+      if (heldMs >= 220) {
+        // Hold-to-peek: restore on release
+        state.flickerActive = false;
+      } else {
+        // Quick tap: toggle state
+        state.flickerActive = !wasActiveOnDown;
+      }
+      el.classList.toggle('flicker-active', state.flickerActive);
+      syncViewportScene();
+      if (syncToolbar) renderStageToolbar();
+    };
+
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+  }
 
   let autoModalState = {
     /** @type {LoadedImage | null} */
@@ -272,6 +478,7 @@
     onSelectionComplete: handleSelectionComplete,
     onRegionClick: handleViewportRegionClick,
     onTransformChange: handleViewportTransformChange,
+    onEmptyClick: handleEmptyCanvasClick,
     onZoomChange: (z) => {
       zoomReadout.textContent = `${Math.round(z * 100)}%`;
     },
@@ -824,9 +1031,11 @@
    * @param {RequestInit} [options]
    */
   async function fluxApiFetch(endpoint, options = {}) {
+    const lanHost = window.location.hostname || '127.0.0.1';
+    const lanProto = window.location.protocol === 'https:' ? 'https:' : 'http:';
     const candidates = state.flux.apiBase
       ? [state.flux.apiBase]
-      : ['', 'http://127.0.0.1:8766'];
+      : ['', `${lanProto}//${lanHost}:8766`];
 
     let lastErr = null;
     for (const base of candidates) {
@@ -1542,10 +1751,19 @@
     ];
 
     stepperNav.innerHTML = '';
+    /** @type {HTMLButtonElement | null} */
+    let activeBtn = null;
     steps.forEach((s, idx) => {
       const btn = document.createElement('button');
-      btn.className = `step-btn${s.isFlux ? ' flux-pill' : ''}${state.activeStep === s.id ? ' active' : ''}${s.done ? ' done' : ''}`;
-      btn.innerHTML = `<span class="step-num">${s.done && state.activeStep !== s.id ? '✓' : s.num}</span><span>${s.label}</span>`;
+      const isActive = state.activeStep === s.id;
+      btn.className = `step-btn${s.isFlux ? ' flux-pill' : ''}${isActive ? ' active' : ''}${s.done ? ' done' : ''}`;
+      btn.innerHTML = `<span class="step-num">${s.done && !isActive ? '✓' : s.num}</span><span>${s.label}</span>`;
+      if (isActive) {
+        activeBtn = btn;
+        if (sheetStepLabel) {
+          sheetStepLabel.textContent = `${s.num}${s.isFlux ? '' : '.'} ${s.label}`;
+        }
+      }
       btn.addEventListener('click', () => {
         state.activeStep = s.id;
         if (s.id === 'flux') {
@@ -1563,6 +1781,10 @@
         stepperNav.appendChild(arrow);
       }
     });
+
+    if (activeBtn && isMobileLayout()) {
+      activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
   }
 
   function renderStageToolbar() {
@@ -1614,6 +1836,7 @@
     } else if (state.activeStep === 1) {
       addPill('✂ Cortar / Laço', state.step1Tool === 'cut', () => {
         state.step1Tool = 'cut';
+        if (isMobileLayout() && mobileSheetMode === 'expanded') setMobileSheetState('peek');
         syncViewportScene();
         renderStageToolbar();
       });
@@ -1657,16 +1880,12 @@
         syncViewportScene();
         renderStageToolbar();
       });
-      const flickPill = addPill('👁️ Piscar A/B (F)', state.flickerActive, () => {
-        state.flickerActive = !state.flickerActive;
-        syncViewportScene();
-        renderStageToolbar();
-      });
-      flickPill.title = 'Segure para piscar com a imagem original (Atalho: Tecla F)';
-      flickPill.addEventListener('mousedown', () => {
-        state.flickerActive = true;
-        syncViewportScene();
-      });
+      const flickPill = document.createElement('button');
+      flickPill.className = `tool-pill${state.flickerActive ? ' active flicker-active' : ''}`;
+      flickPill.textContent = '👁️ Piscar A/B';
+      flickPill.title = 'Segure para piscar ou toque rápido para alternar (Tecla F)';
+      stageModeToolbar.appendChild(flickPill);
+      bindFlickerControl(flickPill, true);
       addPill('↶ -90°', false, () => {
         state.img2Transform.rotation =
           Math.round(((state.img2Transform.rotation || 0) - 90) * 10) / 10;
@@ -1776,12 +1995,18 @@
         if (state.step6Tool !== 'pan' && state.step6View.startsWith('compare')) {
           state.step6View = 'post';
         }
+        if (isMobileLayout() && state.step6Tool !== 'pan' && mobileSheetMode === 'expanded') {
+          setMobileSheetState('peek');
+        }
         syncAllUI();
       });
       addPill('🎯 Amostrar Corpo', state.step6Tool === 'sample-body', () => {
         state.step6Tool = state.step6Tool === 'sample-body' ? 'pan' : 'sample-body';
         if (state.step6Tool !== 'pan' && state.step6View.startsWith('compare')) {
           state.step6View = 'post';
+        }
+        if (isMobileLayout() && state.step6Tool !== 'pan' && mobileSheetMode === 'expanded') {
+          setMobileSheetState('peek');
         }
         syncAllUI();
       });
@@ -1977,7 +2202,7 @@
     document.getElementById('btnPromptOrigHair')?.addEventListener('click', async () => {
       try {
         const txt = (Prompts && Prompts.originalHair) || '';
-        await navigator.clipboard.writeText(txt);
+        await Ops.copyTextToClipboard(txt);
         showToast('prompt; cabelo original copiado para a área de transferência!');
       } catch (err) {
         showToast('Falha ao copiar prompt: ' + err.message, true);
@@ -1987,7 +2212,7 @@
     document.getElementById('btnPromptRefHair')?.addEventListener('click', async () => {
       try {
         const txt = (Prompts && Prompts.referenceHair) || '';
-        await navigator.clipboard.writeText(txt);
+        await Ops.copyTextToClipboard(txt);
         showToast('prompt; cabelo referencia copiado para a área de transferência!');
       } catch (err) {
         showToast('Falha ao copiar prompt: ' + err.message, true);
@@ -1997,7 +2222,7 @@
     bindCopyDownload('copyCorpo1', 'dlCorpo1', () => state.corpo1Canvas, 'imagem1_corpo_isolado.png');
     bindCopyDownload('copyFace1', 'dlFace1', () => state.face1Canvas, 'imagem1_face_isolada.png');
     document.getElementById('copyOrigImg1')?.addEventListener('click', () => {
-      if (state.img1Canvas) copyWithToast(state.img1Canvas, 'imagem1 copiada!');
+      if (state.img1Canvas) copyWithToast(state.img1Canvas, 'imagem1 copiada!', 'imagem1.png');
     });
     document.getElementById('sbNextTo2')?.addEventListener('click', () => {
       if (!state.faceMask1) {
@@ -2478,7 +2703,7 @@
     });
     document.getElementById('btnFluxCopyPrompt')?.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText(state.flux.promptText || '');
+        await Ops.copyTextToClipboard(state.flux.promptText || '');
         showToast('Prompt adaptado copiado!');
       } catch (err) {
         showToast('Falha ao copiar prompt: ' + err.message, true);
@@ -2589,11 +2814,16 @@
         'flux_collage_input.png',
         state.targetDataFolder
       );
-      showToast(
-        res.viaApi
-          ? `Colagem salva em /${res.path}!`
-          : 'Download da colagem concluído.'
-      );
+      if (res.viaApi && isRemoteClient()) {
+        Ops.downloadCanvasAsPng(state.fluxCollageCanvas, 'flux_collage_input.png');
+        showToast(`Colagem salva em /${res.path} e baixada no dispositivo!`);
+      } else {
+        showToast(
+          res.viaApi
+            ? `Colagem salva em /${res.path}!`
+            : 'Download da colagem concluído.'
+        );
+      }
     });
     document.getElementById('btnFluxUnloadVram')?.addEventListener('click', async () => {
       try {
@@ -2670,10 +2900,16 @@
             <span class="control-val" id="valImg2XY">0, 0</span>
           </div>
           <div class="slider-line">
-            <input type="number" class="num-input" style="flex:1" id="numImg2X" step="1" value="${Math.round(state.img2Transform.x)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento X" />
-            <input type="number" class="num-input" style="flex:1" id="numImg2Y" step="1" value="${Math.round(state.img2Transform.y)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento Y" />
+            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numImg2X" step="1" value="${Math.round(state.img2Transform.x)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento X" />
+            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numImg2Y" step="1" value="${Math.round(state.img2Transform.y)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento Y" />
             <button class="btn btn-xs" id="btnImg2ResetContain" ${!state.img2 ? 'disabled' : ''} title="Centralizar">🎯 Centralizar</button>
             <button class="btn btn-xs" id="btnImg2Cover" ${!state.img2 ? 'disabled' : ''} title="Preencher">⛶ Preencher</button>
+          </div>
+          <div class="nudge-row">
+            <button class="btn btn-xs" id="btnImg2NudgeL" ${!state.img2 ? 'disabled' : ''} title="Mover 2px para esquerda">←</button>
+            <button class="btn btn-xs" id="btnImg2NudgeU" ${!state.img2 ? 'disabled' : ''} title="Mover 2px para cima">↑</button>
+            <button class="btn btn-xs" id="btnImg2NudgeD" ${!state.img2 ? 'disabled' : ''} title="Mover 2px para baixo">↓</button>
+            <button class="btn btn-xs" id="btnImg2NudgeR" ${!state.img2 ? 'disabled' : ''} title="Mover 2px para direita">→</button>
           </div>
         </div>
 
@@ -2728,14 +2964,7 @@
       renderStageToolbar();
     });
     const sbFlick = document.getElementById('btnSbFlicker');
-    sbFlick?.addEventListener('mousedown', () => {
-      state.flickerActive = true;
-      syncViewportScene();
-    });
-    sbFlick?.addEventListener('click', () => {
-      state.flickerActive = !state.flickerActive;
-      syncViewportScene();
-    });
+    bindFlickerControl(sbFlick, true);
 
     const rngScale = /** @type {HTMLInputElement | null} */ (document.getElementById('rngImg2Scale'));
     const numScale = /** @type {HTMLInputElement | null} */ (document.getElementById('numImg2Scale'));
@@ -2821,6 +3050,20 @@
     };
     numX?.addEventListener('input', onXYChange);
     numY?.addEventListener('input', onXYChange);
+
+    const nudgeImg2 = (dx, dy) => {
+      state.step2View = 'align';
+      state.img2Transform.x = Math.round((state.img2Transform.x + dx) * 10) / 10;
+      state.img2Transform.y = Math.round((state.img2Transform.y + dy) * 10) / 10;
+      recomputeStep2Outputs();
+      syncViewportScene();
+      updateSidebarLiveValues();
+      updateSidebarThumbnails();
+    };
+    document.getElementById('btnImg2NudgeL')?.addEventListener('click', () => nudgeImg2(-2, 0));
+    document.getElementById('btnImg2NudgeR')?.addEventListener('click', () => nudgeImg2(2, 0));
+    document.getElementById('btnImg2NudgeU')?.addEventListener('click', () => nudgeImg2(0, -2));
+    document.getElementById('btnImg2NudgeD')?.addEventListener('click', () => nudgeImg2(0, 2));
 
     rngOnion?.addEventListener('input', () => {
       state.step2View = 'align';
@@ -3090,8 +3333,14 @@
             <span class="control-val" id="valRefXY">0, 0</span>
           </div>
           <div class="slider-line">
-            <input type="number" class="num-input" style="flex:1" id="numRefX" step="1" value="${Math.round(state.refinedTransform.x)}" ${!state.imgRefined ? 'disabled' : ''} />
-            <input type="number" class="num-input" style="flex:1" id="numRefY" step="1" value="${Math.round(state.refinedTransform.y)}" ${!state.imgRefined ? 'disabled' : ''} />
+            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numRefX" step="1" value="${Math.round(state.refinedTransform.x)}" ${!state.imgRefined ? 'disabled' : ''} />
+            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numRefY" step="1" value="${Math.round(state.refinedTransform.y)}" ${!state.imgRefined ? 'disabled' : ''} />
+          </div>
+          <div class="nudge-row">
+            <button class="btn btn-xs" id="btnRefNudgeL" ${!state.imgRefined ? 'disabled' : ''} title="Mover 2px para esquerda">←</button>
+            <button class="btn btn-xs" id="btnRefNudgeU" ${!state.imgRefined ? 'disabled' : ''} title="Mover 2px para cima">↑</button>
+            <button class="btn btn-xs" id="btnRefNudgeD" ${!state.imgRefined ? 'disabled' : ''} title="Mover 2px para baixo">↓</button>
+            <button class="btn btn-xs" id="btnRefNudgeR" ${!state.imgRefined ? 'disabled' : ''} title="Mover 2px para direita">→</button>
           </div>
         </div>
 
@@ -3139,7 +3388,13 @@
 
     document.getElementById('sbQuickCopyImp')?.addEventListener('click', () => {
       const c = getFaceImprecisaExportCanvas();
-      if (c) copyWithToast(c, '(Face + bordas imprecisas) copiada para a área de transferência!');
+      if (c) {
+        copyWithToast(
+          c,
+          '(Face + bordas imprecisas) copiada para a área de transferência!',
+          'face_mais_bordas_imprecisas.png'
+        );
+      }
     });
 
     document.getElementById('sbImportRefined')?.addEventListener('click', () => fileInputRefined.click());
@@ -3193,6 +3448,20 @@
     };
     numX?.addEventListener('input', onRefXY);
     numY?.addEventListener('input', onRefXY);
+
+    const nudgeRef = (dx, dy) => {
+      state.step4View = 'align';
+      state.refinedTransform.x = Math.round((state.refinedTransform.x + dx) * 10) / 10;
+      state.refinedTransform.y = Math.round((state.refinedTransform.y + dy) * 10) / 10;
+      recomputeStep4Outputs();
+      syncViewportScene();
+      updateSidebarLiveValues();
+      updateSidebarThumbnails();
+    };
+    document.getElementById('btnRefNudgeL')?.addEventListener('click', () => nudgeRef(-2, 0));
+    document.getElementById('btnRefNudgeR')?.addEventListener('click', () => nudgeRef(2, 0));
+    document.getElementById('btnRefNudgeU')?.addEventListener('click', () => nudgeRef(0, -2));
+    document.getElementById('btnRefNudgeD')?.addEventListener('click', () => nudgeRef(0, 2));
 
     rngOnion?.addEventListener('input', () => {
       state.step4View = 'align';
@@ -4026,14 +4295,19 @@
   function bindCopyDownload(copyId, dlId, getCanvas, filename) {
     document.getElementById(copyId)?.addEventListener('click', () => {
       const c = getCanvas();
-      if (c) copyWithToast(c, `${filename} copiado para a área de transferência!`);
+      if (c) copyWithToast(c, `${filename} copiado para a área de transferência!`, filename);
     });
     document.getElementById(dlId)?.addEventListener('click', async () => {
       const c = getCanvas();
       if (c) {
         const res = await Ops.saveCanvasToData(c, filename, state.targetDataFolder);
         if (res.viaApi) {
-          showToast(`Salvo com sucesso em /${res.path}!`);
+          if (isRemoteClient()) {
+            Ops.downloadCanvasAsPng(c, filename);
+            showToast(`Salvo em /${res.path} e baixado no dispositivo!`);
+          } else {
+            showToast(`Salvo com sucesso em /${res.path}!`);
+          }
         } else {
           showToast(`Download de ${filename} concluído (salvar em /data/${state.targetDataFolder || ''})`);
         }
@@ -4109,12 +4383,20 @@
     });
   }
 
-  async function copyWithToast(canvas, successMsg) {
+  async function copyWithToast(canvas, successMsg, fallbackFilename = 'imagem.png') {
     try {
       await Ops.copyCanvasToClipboard(canvas);
       showToast(successMsg);
     } catch (err) {
-      showToast(err.message || 'Erro ao copiar imagem.', true);
+      // On mobile HTTP LAN, Clipboard API for PNG may be unavailable -> seamlessly share or download!
+      const action = await Ops.shareOrDownloadCanvas(canvas, fallbackFilename);
+      if (action === 'shared') {
+        showToast('Imagem compartilhada!');
+      } else if (action === 'downloaded') {
+        showToast(`PNG baixado no dispositivo (${fallbackFilename}).`);
+      } else if (err && err.message) {
+        showToast(err.message, true);
+      }
     }
   }
 
@@ -4551,10 +4833,15 @@
 
   function drawEyePins(ctx, pL, pR, color, labelL, labelR) {
     ctx.save();
+    const minDim = Math.min(ctx.canvas.width || 600, ctx.canvas.height || 600);
+    const pinR = Math.max(11, Math.round(minDim * 0.022));
+    const cross = Math.round(pinR * 0.65);
+    const strokeW = Math.max(3, Math.round(pinR * 0.28));
+
     if (pL && pR) {
       ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
-      ctx.setLineDash([8, 6]);
+      ctx.lineWidth = strokeW;
+      ctx.setLineDash([pinR * 0.75, pinR * 0.55]);
       ctx.beginPath();
       ctx.moveTo(pL.x, pL.y);
       ctx.lineTo(pR.x, pR.y);
@@ -4566,24 +4853,24 @@
       if (!p) return;
       ctx.fillStyle = '#0f172a';
       ctx.strokeStyle = color;
-      ctx.lineWidth = 3.5;
+      ctx.lineWidth = strokeW;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, pinR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(2, Math.round(strokeW * 0.6));
       ctx.beginPath();
-      ctx.moveTo(p.x - 7, p.y);
-      ctx.lineTo(p.x + 7, p.y);
-      ctx.moveTo(p.x, p.y - 7);
-      ctx.lineTo(p.x, p.y + 7);
+      ctx.moveTo(p.x - cross, p.y);
+      ctx.lineTo(p.x + cross, p.y);
+      ctx.moveTo(p.x, p.y - cross);
+      ctx.lineTo(p.x, p.y + cross);
       ctx.stroke();
 
       ctx.fillStyle = color;
-      ctx.font = 'bold 12px system-ui, sans-serif';
-      ctx.fillText(label, p.x + 14, p.y + 4);
+      ctx.font = `bold ${Math.max(12, Math.round(pinR * 1.1))}px system-ui, sans-serif`;
+      ctx.fillText(label, p.x + pinR + 4, p.y + Math.round(pinR * 0.35));
     };
 
     drawPin(pL, labelL);
@@ -4930,6 +5217,7 @@
 
   // Initial render (and optional ?demo=1&step=N deep link)
   const urlParams = new URLSearchParams(window.location.search);
+  initMobileSheet();
   initDataFolderControl();
   initAutoSelectModal();
   initEyeCalibrateModal();

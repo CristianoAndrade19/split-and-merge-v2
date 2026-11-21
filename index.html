@@ -2,7 +2,10 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="theme-color" content="#090d16" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Split &amp; Merge Studio — Corpo + Face + IA</title>
   <link rel="stylesheet" href="css/styles.css" />
 </head>
@@ -40,9 +43,9 @@
       <!-- Interactive Canvas Area -->
       <section class="stage-area">
         <div class="canvas-toolbar">
-          <div class="toolbar-group" id="stageModeToolbar"></div>
+          <div class="toolbar-group toolbar-modes" id="stageModeToolbar"></div>
 
-          <div class="toolbar-group">
+          <div class="toolbar-group toolbar-zoom" id="zoomToolbar">
             <button class="tool-pill active" id="btnToggleOverlay" title="Mostrar ou ocultar linhas de corte e máscaras">
               Guias
             </button>
@@ -61,7 +64,7 @@
           <div id="stageHintText">
             Segure o mouse: corte tocando 2 bordas (pode vir de fora) ou feche um laço.
           </div>
-          <div>
+          <div class="stage-footer-shortcuts">
             <span class="kbd">Espaço</span> + Arrastar: Mover vista &nbsp;•&nbsp;
             <span class="kbd">Scroll</span>: Zoom &nbsp;•&nbsp;
             <span class="kbd">Ctrl+V</span>: Colar imagem
@@ -69,8 +72,19 @@
         </footer>
       </section>
 
-      <!-- Right Inspector Panel -->
-      <aside class="sidebar">
+      <!-- Right Inspector Panel (Bottom Sheet on Mobile) -->
+      <aside class="sidebar" id="sidebarPanel" data-sheet="half">
+        <div class="sheet-handle-bar" id="sheetHandleBar" role="button" aria-label="Redimensionar painel de controles">
+          <div class="sheet-pill"></div>
+          <div class="sheet-bar-row">
+            <span class="sheet-step-label" id="sheetStepLabel">1. imagem1 • Corpo</span>
+            <div class="sheet-snap-actions">
+              <button type="button" class="sheet-snap-btn" id="btnSheetPeek" title="Focar na imagem (minimizar painel)">▼</button>
+              <button type="button" class="sheet-snap-btn active" id="btnSheetHalf" title="Tela dividida">⇕</button>
+              <button type="button" class="sheet-snap-btn" id="btnSheetExpand" title="Expandir controles">▲</button>
+            </div>
+          </div>
+        </div>
         <div class="sidebar-scroll" id="sidebarContent"></div>
       </aside>
     </main>

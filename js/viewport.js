@@ -12,9 +12,10 @@
      * @param {{
      *   onSelectionComplete?: (sel: SelectionShape) => void,
      *   onRegionClick?: (pt: Point) => void,
-     *   onTransformChange?: (tx: number, ty: number, scale: number, isDragging: boolean) => void,
+     *   onTransformChange?: (tx: number, ty: number, scale: number, rotation?: number, isDragging?: boolean) => void,
      *   onZoomChange?: (zoom: number) => void,
-     *   onCompareChange?: (splitRatio: number) => void
+     *   onCompareChange?: (splitRatio: number) => void,
+     *   onEmptyClick?: () => void
      * }} callbacks
      */
     constructor(canvas, callbacks = {}) {
@@ -67,11 +68,18 @@
 
       // Active pointer interaction state
       this.isPointerDown = false;
-      /** @type {'none' | 'pan' | 'stroke' | 'align-move' | 'align-scale' | 'compare'} */
+      /** @type {'none' | 'pan' | 'pinch' | 'empty-tap' | 'stroke' | 'align-move' | 'align-scale' | 'align-rotate' | 'compare'} */
       this.dragAction = 'none';
       this.pointerId = -1;
       this.dragStartScreen = { x: 0, y: 0 };
       this.panStart = { x: 0, y: 0 };
+      this.pointerDownTime = 0;
+      this.lastPointerType = 'mouse';
+      /** @type {Map<number, Point>} */
+      this.activePointers = new Map();
+      /** @type {{ startDist: number, startMid: Point, startZoom: number, startPanX: number, startPanY: number } | null} */
+      this.pinchState = null;
+      this.waitAllPointersUp = false;
 
       // Freehand cut/lasso stroke state
       /** @type {Point[]} */
@@ -245,6 +253,12 @@
       };
     }
 
+    _isCoarseUI() {
+      if (this.lastPointerType === 'touch') return true;
+      if (this.getCssSize().w <= 720) return true;
+      return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    }
+
     _getAlignHandlePositions() {
       const box = this.renderState.alignBox;
       if (!box) return null;
@@ -260,7 +274,7 @@
         y: c.y + lx * sinR + ly * cosR,
       });
 
-      const stalkLen = 24;
+      const stalkLen = this._isCoarseUI() ? 32 : 24;
       const rotHandle = rotatePt(0, -h * 0.5 - stalkLen);
       const corners = [
         rotatePt(-w * 0.5, -h * 0.5),
@@ -269,22 +283,24 @@
         rotatePt(-w * 0.5, h * 0.5),
       ];
 
-      return { c, w, h, rot, rotHandle, corners };
+      return { c, w, h, rot, stalkLen, rotHandle, corners };
     }
 
-    _hitTestAlignCorner(sx, sy) {
+    _hitTestAlignCorner(sx, sy, isTouch = false) {
       const handles = this._getAlignHandlePositions();
       if (!handles) return false;
+      const r = isTouch || this._isCoarseUI() ? 28 : 14;
       for (const c of handles.corners) {
-        if (Math.hypot(sx - c.x, sy - c.y) <= 13) return true;
+        if (Math.hypot(sx - c.x, sy - c.y) <= r) return true;
       }
       return false;
     }
 
-    _hitTestAlignRotate(sx, sy) {
+    _hitTestAlignRotate(sx, sy, isTouch = false) {
       const handles = this._getAlignHandlePositions();
       if (!handles) return false;
-      return Math.hypot(sx - handles.rotHandle.x, sy - handles.rotHandle.y) <= 13;
+      const r = isTouch || this._isCoarseUI() ? 28 : 14;
+      return Math.hypot(sx - handles.rotHandle.x, sy - handles.rotHandle.y) <= r;
     }
 
     _bindEvents() {
@@ -319,12 +335,74 @@
       );
 
       this.canvas.addEventListener('pointerdown', (e) => {
-        if (this.docW <= 0 || this.docH <= 0) return;
         const pos = this._eventScreenPos(e);
+        this.lastPointerType = e.pointerType || 'mouse';
+        const isTouch = this.lastPointerType === 'touch';
+
+        try {
+          this.canvas.setPointerCapture(e.pointerId);
+        } catch {}
+        this.activePointers.set(e.pointerId, pos);
+
+        // Allow tapping empty state box to open file picker on Mobile/Desktop
+        if (this.docW <= 0 || this.docH <= 0 || !this.renderState.primaryCanvas) {
+          if (e.button === 0 && this.activePointers.size === 1) {
+            this.isPointerDown = true;
+            this.pointerId = e.pointerId;
+            this.dragStartScreen = pos;
+            this.dragAction = 'empty-tap';
+          }
+          return;
+        }
+
+        // 2-finger pinch-to-zoom + simultaneous pan in ANY mode!
+        if (this.activePointers.size === 2) {
+          if (this.dragAction === 'stroke') {
+            this.strokePts = [];
+            this._stopDashAnimation();
+          } else if (
+            (this.dragAction === 'align-move' ||
+              this.dragAction === 'align-scale' ||
+              this.dragAction === 'align-rotate') &&
+            performance.now() - this.pointerDownTime < 220
+          ) {
+            this.alignBaseTransform = { ...this.alignStartTransform };
+            if (this.callbacks.onTransformChange) {
+              this.callbacks.onTransformChange(
+                this.alignBaseTransform.x,
+                this.alignBaseTransform.y,
+                this.alignBaseTransform.scale,
+                this.alignBaseTransform.rotation || 0,
+                false
+              );
+            }
+          }
+
+          const pts = Array.from(this.activePointers.values());
+          const p1 = pts[0];
+          const p2 = pts[1];
+          this.dragAction = 'pinch';
+          this.waitAllPointersUp = true;
+          this.isPointerDown = true;
+          this.pinchState = {
+            startDist: Math.max(8, Math.hypot(p2.x - p1.x, p2.y - p1.y)),
+            startMid: { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 },
+            startZoom: this.zoom,
+            startPanX: this.panX,
+            startPanY: this.panY,
+          };
+          this.requestRender();
+          return;
+        }
+
+        if (this.waitAllPointersUp || this.activePointers.size > 2) {
+          return;
+        }
+
         this.isPointerDown = true;
         this.pointerId = e.pointerId;
         this.dragStartScreen = pos;
-        this.canvas.setPointerCapture(e.pointerId);
+        this.pointerDownTime = performance.now();
 
         // Middle mouse, Right mouse, Spacebar, or explicit Pan tool -> Pan camera
         if (e.button === 1 || e.button === 2 || this.spacePressed || this.mode === 'pan') {
@@ -351,13 +429,13 @@
             rotation: this.alignBaseTransform.rotation || 0,
           };
           const box = this.renderState.alignBox;
-          if (box && this._hitTestAlignRotate(pos.x, pos.y)) {
+          if (box && this._hitTestAlignRotate(pos.x, pos.y, isTouch)) {
             this.dragAction = 'align-rotate';
             const handles = this._getAlignHandlePositions();
             this.alignStartAngle = handles
               ? Math.atan2(pos.y - handles.c.y, pos.x - handles.c.x)
               : 0;
-          } else if (box && this._hitTestAlignCorner(pos.x, pos.y)) {
+          } else if (box && this._hitTestAlignCorner(pos.x, pos.y, isTouch)) {
             this.dragAction = 'align-scale';
             this.alignCenterImg = {
               x: box.cx || box.drawX + box.drawW * 0.5,
@@ -401,9 +479,37 @@
 
       this.canvas.addEventListener('pointermove', (e) => {
         const pos = this._eventScreenPos(e);
+        if (this.activePointers.has(e.pointerId)) {
+          this.activePointers.set(e.pointerId, pos);
+        }
 
-        if (!this.isPointerDown || e.pointerId !== this.pointerId) {
-          this._updateHoverCursor(pos.x, pos.y);
+        // Simultaneous Pinch-Zoom + Two-Finger Pan
+        if (this.dragAction === 'pinch' && this.pinchState && this.activePointers.size >= 2) {
+          const pts = Array.from(this.activePointers.values());
+          const p1 = pts[0];
+          const p2 = pts[1];
+          const curMid = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
+          const curDist = Math.max(8, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+          const ratio = curDist / this.pinchState.startDist;
+          const nextZoom = Math.max(0.05, Math.min(16, this.pinchState.startZoom * ratio));
+
+          const imgAnchorX =
+            (this.pinchState.startMid.x - this.pinchState.startPanX) / this.pinchState.startZoom;
+          const imgAnchorY =
+            (this.pinchState.startMid.y - this.pinchState.startPanY) / this.pinchState.startZoom;
+          this.zoom = nextZoom;
+          this.panX = curMid.x - imgAnchorX * nextZoom;
+          this.panY = curMid.y - imgAnchorY * nextZoom;
+
+          if (this.callbacks.onZoomChange) this.callbacks.onZoomChange(this.zoom);
+          this.requestRender();
+          return;
+        }
+
+        if (!this.isPointerDown || e.pointerId !== this.pointerId || this.waitAllPointersUp) {
+          if (e.pointerType !== 'touch') {
+            this._updateHoverCursor(pos.x, pos.y);
+          }
           return;
         }
 
@@ -509,10 +615,30 @@
       });
 
       const finishPointer = (/** @type {PointerEvent} */ e) => {
+        this.activePointers.delete(e.pointerId);
+
+        if (this.dragAction === 'pinch' || this.waitAllPointersUp) {
+          this.pinchState = null;
+          if (this.activePointers.size === 0) {
+            this.waitAllPointersUp = false;
+            this.isPointerDown = false;
+            this.dragAction = 'none';
+            this.pointerId = -1;
+            this._updateCursor();
+            this.requestRender();
+          }
+          return;
+        }
+
         if (!this.isPointerDown || e.pointerId !== this.pointerId) return;
         const pos = this._eventScreenPos(e);
 
-        if (this.dragAction === 'stroke') {
+        if (this.dragAction === 'empty-tap') {
+          const moved = Math.hypot(pos.x - this.dragStartScreen.x, pos.y - this.dragStartScreen.y);
+          if (moved < 14 && this.callbacks.onEmptyClick) {
+            this.callbacks.onEmptyClick();
+          }
+        } else if (this.dragAction === 'stroke') {
           const movedScreen = Math.hypot(
             pos.x - this.dragStartScreen.x,
             pos.y - this.dragStartScreen.y
@@ -838,15 +964,41 @@
       }
     }
 
+    /**
+     * Wraps a line of text cleanly to fit inside `maxW` px.
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {string} text
+     * @param {number} maxW
+     * @returns {string[]}
+     */
+    _wrapCanvasText(ctx, text, maxW) {
+      const words = String(text || '').split(/\s+/);
+      const lines = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? `${cur} ${w}` : w;
+        if (ctx.measureText(test).width > maxW && cur) {
+          lines.push(cur);
+          cur = w;
+        } else {
+          cur = test;
+        }
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
     _drawEmptyState(ctx, vw, vh) {
-      const boxW = Math.min(460, vw - 48);
-      const boxH = 210;
+      const compact = vw <= 520;
+      const boxW = Math.min(460, Math.max(220, vw - 28));
+      const boxH = compact ? Math.min(200, Math.max(150, vh - 90)) : 210;
       const bx = (vw - boxW) * 0.5;
       const by = (vh - boxH) * 0.5;
+      const maxTextW = boxW - 28;
 
       ctx.save();
-      ctx.fillStyle = 'rgba(17, 24, 39, 0.86)';
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.88)';
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.42)';
       ctx.lineWidth = 1.5;
       ctx.setLineDash([8, 6]);
       ctx.beginPath();
@@ -856,21 +1008,38 @@
       ctx.setLineDash([]);
 
       ctx.fillStyle = '#38bdf8';
-      ctx.font = '600 28px system-ui, -apple-system, Segoe UI, sans-serif';
+      ctx.font = compact
+        ? '600 24px system-ui, -apple-system, Segoe UI, sans-serif'
+        : '600 28px system-ui, -apple-system, Segoe UI, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('＋', vw * 0.5, by + 68);
+      ctx.fillText('＋', vw * 0.5, by + (compact ? 42 : 64));
 
       ctx.fillStyle = '#f1f5f9';
-      ctx.font = '600 16px system-ui, -apple-system, Segoe UI, sans-serif';
-      ctx.fillText(this.renderState.emptyHintTitle, vw * 0.5, by + 112);
+      ctx.font = compact
+        ? '600 14px system-ui, -apple-system, Segoe UI, sans-serif'
+        : '600 16px system-ui, -apple-system, Segoe UI, sans-serif';
+      const titleLines = this._wrapCanvasText(ctx, this.renderState.emptyHintTitle, maxTextW);
+      let ty = by + (compact ? 74 : 104);
+      for (const line of titleLines.slice(0, 2)) {
+        ctx.fillText(line, vw * 0.5, ty);
+        ty += compact ? 18 : 22;
+      }
 
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '13px system-ui, -apple-system, Segoe UI, sans-serif';
-      ctx.fillText(this.renderState.emptyHintSub, vw * 0.5, by + 142);
+      ctx.font = compact
+        ? '11.5px system-ui, -apple-system, Segoe UI, sans-serif'
+        : '13px system-ui, -apple-system, Segoe UI, sans-serif';
+      const subLines = this._wrapCanvasText(ctx, this.renderState.emptyHintSub, maxTextW);
+      let sy = ty + 8;
+      for (const line of subLines.slice(0, 3)) {
+        ctx.fillText(line, vw * 0.5, sy);
+        sy += compact ? 15 : 18;
+      }
       ctx.restore();
     }
 
     _drawDocumentFrame(ctx) {
+      const { w: vw } = this.getCssSize();
       const tl = this.imageToScreen(0, 0);
       const br = this.imageToScreen(this.docW, this.docH);
       const w = br.x - tl.x;
@@ -882,15 +1051,16 @@
       ctx.strokeRect(tl.x, tl.y, w, h);
 
       // Subtle label in outer margin reminding user they can start cuts outside the border
-      if (this.mode === 'cut' && tl.y > 22) {
-        ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
+      if (this.mode === 'cut' && tl.y > (vw <= 640 ? 64 : 22)) {
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.68)';
         ctx.font = '11px system-ui, -apple-system, Segoe UI, sans-serif';
         ctx.textAlign = 'left';
-        ctx.fillText(
-          `${this.docW} × ${this.docH} px  •  Segure o mouse: corte tocando 2 bordas (pode vir de fora) ou feche um laço`,
-          tl.x,
-          tl.y - 8
-        );
+        const hint =
+          vw <= 640 || this._isCoarseUI()
+            ? `${this.docW}×${this.docH} • Arraste: corte/laço • 2 dedos: zoom`
+            : `${this.docW} × ${this.docH} px  •  Segure o mouse: corte tocando 2 bordas (pode vir de fora) ou feche um laço`;
+        const lx = Math.max(10, Math.min(vw - 240, tl.x));
+        ctx.fillText(hint, lx, tl.y - 8);
       }
       ctx.restore();
     }
@@ -931,14 +1101,17 @@
     _drawAlignGizmo(ctx, box) {
       const handles = this._getAlignHandlePositions();
       if (!handles) return;
-      const { c, w, h, rot } = handles;
+      const { c, w, h, rot, stalkLen } = handles;
+      const coarse = this._isCoarseUI();
+      const rotR = coarse ? 10 : 6.5;
+      const cornerR = coarse ? 9.5 : 6;
 
       ctx.save();
       ctx.translate(c.x, c.y);
       if (rot) ctx.rotate(rot);
 
       ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 1.75;
+      ctx.lineWidth = coarse ? 2 : 1.75;
       ctx.setLineDash([6, 4]);
       ctx.strokeRect(-w * 0.5, -h * 0.5, w, h);
       ctx.setLineDash([]);
@@ -952,20 +1125,19 @@
       ctx.stroke();
 
       // Top rotation handle with connecting stalk
-      const stalkLen = 24;
       ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = coarse ? 2 : 1.5;
       ctx.beginPath();
       ctx.moveTo(0, -h * 0.5);
       ctx.lineTo(0, -h * 0.5 - stalkLen);
       ctx.stroke();
 
       // Rotation circle handle
-      ctx.fillStyle = '#0284c7';
+      ctx.fillStyle = this.dragAction === 'align-rotate' ? '#38bdf8' : '#0284c7';
       ctx.strokeStyle = '#e0f2fe';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(0, -h * 0.5 - stalkLen, 6.5, 0, Math.PI * 2);
+      ctx.arc(0, -h * 0.5 - stalkLen, rotR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
@@ -977,11 +1149,11 @@
         { x: -w * 0.5, y: h * 0.5 },
       ];
       for (const cr of corners) {
-        ctx.fillStyle = '#0f172a';
+        ctx.fillStyle = this.dragAction === 'align-scale' ? '#38bdf8' : '#0f172a';
         ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.2;
         ctx.beginPath();
-        ctx.arc(cr.x, cr.y, 6, 0, Math.PI * 2);
+        ctx.arc(cr.x, cr.y, cornerR, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
@@ -1054,11 +1226,16 @@
       ctx.strokeRect(sCenter.x - headW * 0.5, sCenter.y - headH * 0.5, headW, headH);
 
       // HUD readout label
+      const { w: vw } = this.getCssSize();
+      const hudTxt =
+        vw <= 540
+          ? '📏 1:2.4 • Alinhe as Pupilas'
+          : '📏 Proporção Cabeça/Ombros: 1:2.4 (Ideal) • Alinhe as Pupilas';
       this._drawPill(
         ctx,
-        sCenter.x,
-        sCenter.y - headH * 0.5 - 16,
-        '📏 Proporção Cabeça/Ombros: 1:2.4 (Ideal) • Alinhe as Pupilas',
+        Math.max(90, Math.min(vw - 90, sCenter.x)),
+        Math.max(60, sCenter.y - headH * 0.5 - 16),
+        hudTxt,
         '#f59e0b',
         'center'
       );
@@ -1067,13 +1244,15 @@
     }
 
     _drawCompareDivider(ctx) {
+      const { w: vw, h: vh } = this.getCssSize();
+      const coarse = this._isCoarseUI();
       const splitImgX = this.docW * this.renderState.compareRatio;
       const top = this.imageToScreen(splitImgX, 0);
       const bot = this.imageToScreen(splitImgX, this.docH);
 
       ctx.save();
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = coarse ? 2.5 : 2;
       ctx.shadowColor = 'rgba(0,0,0,0.7)';
       ctx.shadowBlur = 6;
       ctx.beginPath();
@@ -1081,25 +1260,33 @@
       ctx.lineTo(bot.x, bot.y);
       ctx.stroke();
 
-      const midY = (top.y + bot.y) * 0.5;
+      const midY = Math.max(64, Math.min(vh - 36, (top.y + bot.y) * 0.5));
+      const knobR = coarse ? 20 : 15;
       ctx.fillStyle = '#0f172a';
       ctx.beginPath();
-      ctx.arc(top.x, midY, 15, 0, Math.PI * 2);
+      ctx.arc(top.x, midY, knobR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
       ctx.shadowBlur = 0;
       ctx.fillStyle = '#f8fafc';
-      ctx.font = '700 12px system-ui, sans-serif';
+      ctx.font = coarse ? '700 15px system-ui, sans-serif' : '700 12px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('↔', top.x, midY);
 
-      // Corner compare labels
+      // Corner compare labels clamped neatly inside viewport
       const docTL = this.imageToScreen(0, 0);
       const docTR = this.imageToScreen(this.docW, 0);
-      this._drawPill(ctx, docTL.x + 12, docTL.y + 16, this.renderState.compareLabelBefore, '#f59e0b', 'left');
-      this._drawPill(ctx, docTR.x - 12, docTR.y + 16, this.renderState.compareLabelAfter, '#10b981', 'right');
+      const labelY = Math.max(vw <= 640 ? 64 : 24, docTL.y + 16);
+      const leftX = Math.max(8, docTL.x + 10);
+      const rightX = Math.min(vw - 8, docTR.x - 10);
+      const beforeTxt =
+        vw <= 480 ? this.renderState.compareLabelBefore.replace(/^Antes:\s*/i, '') : this.renderState.compareLabelBefore;
+      const afterTxt =
+        vw <= 480 ? this.renderState.compareLabelAfter.replace(/^Depois:\s*/i, '') : this.renderState.compareLabelAfter;
+      this._drawPill(ctx, leftX, labelY, beforeTxt, '#f59e0b', 'left');
+      this._drawPill(ctx, rightX, labelY, afterTxt, '#10b981', 'right');
       ctx.restore();
     }
 
