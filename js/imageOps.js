@@ -321,12 +321,45 @@
       ctx.clearRect(0, 0, fullW, fullH);
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
+
+      // Progressive 2x mipmap downscaling when shrinking > 1.8x avoids moiré & harsh aliasing
+      /** @type {HTMLImageElement | HTMLCanvasElement} */
+      let drawSource = source.img;
+      let curW = source.width;
+      let curH = source.height;
+      /** @type {HTMLCanvasElement[]} */
+      const mipsToFree = [];
+
+      if (placement.effectiveScale < 0.55 && curW > 120 && curH > 120) {
+        while (curW * 0.5 > placement.drawW * 1.15 && curH * 0.5 > placement.drawH * 1.15) {
+          const nw = Math.max(2, Math.round(curW * 0.5));
+          const nh = Math.max(2, Math.round(curH * 0.5));
+          const mip = createCanvas(nw, nh);
+          const mctx = mip.getContext('2d');
+          if (!mctx) {
+            releaseCanvas(mip);
+            break;
+          }
+          mctx.imageSmoothingEnabled = true;
+          mctx.imageSmoothingQuality = 'high';
+          mctx.drawImage(drawSource, 0, 0, nw, nh);
+          if (drawSource !== source.img && drawSource instanceof HTMLCanvasElement) {
+            releaseCanvas(drawSource);
+          }
+          drawSource = mip;
+          curW = nw;
+          curH = nh;
+          mipsToFree.push(mip);
+          if (nw <= 64 || nh <= 64) break;
+        }
+      }
+
       if (placement.rotation) {
         ctx.save();
         ctx.translate(placement.cx, placement.cy);
         ctx.rotate((placement.rotation * Math.PI) / 180);
         ctx.drawImage(
-          source.img,
+          drawSource,
           -placement.drawW * 0.5,
           -placement.drawH * 0.5,
           placement.drawW,
@@ -335,16 +368,377 @@
         ctx.restore();
       } else {
         ctx.drawImage(
-          source.img,
+          drawSource,
           placement.drawX,
           placement.drawY,
           placement.drawW,
           placement.drawH
         );
       }
+
+      for (const m of mipsToFree) {
+        releaseCanvas(m);
+      }
     }
 
     return { canvas, placement };
+  }
+
+  /**
+   * Analyzes the true effective pixel density (spatial resolution + replicated pixel blocks)
+   * of an image/canvas, ignoring transparent padding regions and flat background areas.
+   *
+   * @param {HTMLCanvasElement} canvas
+   * @param {Uint8Array | null} [focusMask=null] Optional binary mask to prefer sampling active region
+   * @returns {{
+   *   effectivePitch: number,
+   *   repFactor: number,
+   *   blurPitch: number,
+   *   isBlocky: boolean,
+   *   effW: number,
+   *   effH: number,
+   *   nominalW: number,
+   *   nominalH: number
+   * }}
+   */
+  function analyzeEffectivePixelDensity(canvas, focusMask = null) {
+    const W = canvas.width;
+    const H = canvas.height;
+    const baseResult = {
+      effectivePitch: 1,
+      repFactor: 1,
+      blurPitch: 1,
+      isBlocky: false,
+      effW: W,
+      effH: H,
+      nominalW: W,
+      nominalH: H,
+    };
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx || W < 16 || H < 16) return baseResult;
+
+    // Locate bounding box of opaque pixels (ignoring transparent padding)
+    let minX = W, minY = H, maxX = -1, maxY = -1;
+    const probeStep = Math.max(1, Math.floor(Math.max(W, H) / 128));
+    try {
+      const fullData = ctx.getImageData(0, 0, W, H).data;
+      for (let y = 0; y < H; y += probeStep) {
+        const row = y * W;
+        for (let x = 0; x < W; x += probeStep) {
+          const i = row + x;
+          if (fullData[i * 4 + 3] >= 128 && (!focusMask || focusMask[i] === 1)) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (maxX < minX) {
+        for (let y = 0; y < H; y += probeStep) {
+          const row = y * W;
+          for (let x = 0; x < W; x += probeStep) {
+            if (fullData[(row + x) * 4 + 3] >= 128) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+      }
+      if (maxX < minX) {
+        minX = 0; minY = 0; maxX = W - 1; maxY = H - 1;
+      }
+
+      const cx = (minX + maxX) >> 1;
+      const cy = (minY + maxY) >> 1;
+      const sw = Math.min(512, Math.max(16, maxX - minX + 1));
+      const sh = Math.min(512, Math.max(16, maxY - minY + 1));
+      const sx = Math.max(0, Math.min(W - sw, cx - (sw >> 1)));
+      const sy = Math.max(0, Math.min(H - sh, cy - (sh >> 1)));
+
+      const nSub = sw * sh;
+      const lum = new Float32Array(nSub);
+      const valid = new Uint8Array(nSub);
+      for (let y = 0; y < sh; y++) {
+        const fRow = (sy + y) * W + sx;
+        const sRow = y * sw;
+        for (let x = 0; x < sw; x++) {
+          const fi = fRow + x;
+          const si = sRow + x;
+          const p4 = fi * 4;
+          if (fullData[p4 + 3] >= 128) {
+            valid[si] = 1;
+            lum[si] =
+              0.299 * fullData[p4] + 0.587 * fullData[p4 + 1] + 0.114 * fullData[p4 + 2];
+          }
+        }
+      }
+
+      // 1. Replicated-pixel detector (nearest-neighbor block grid periods 2, 3, 4 & zero-diff runs)
+      let totalPairDiffs = 0;
+      let zeroDiffCount = 0;
+      const p2 = [0, 0], p2c = [0, 0];
+      const p3 = [0, 0, 0], p3c = [0, 0, 0];
+      const p4arr = [0, 0, 0, 0], p4c = [0, 0, 0, 0];
+
+      for (let y = 0; y < sh - 1; y++) {
+        const row = y * sw;
+        for (let x = 0; x < sw - 1; x++) {
+          const i = row + x;
+          if (!valid[i] || !valid[i + 1] || !valid[i + sw]) continue;
+          const dx = Math.abs(lum[i + 1] - lum[i]);
+          const dy = Math.abs(lum[i + sw] - lum[i]);
+          // Skip dead flat areas
+          if (x + 4 < sw && valid[i + 4] && Math.abs(lum[i + 4] - lum[i]) > 6) {
+            totalPairDiffs++;
+            if (dx <= 1.2) zeroDiffCount++;
+            p2[x % 2] += dx; p2c[x % 2]++;
+            p3[x % 3] += dx; p3c[x % 3]++;
+            p4arr[x % 4] += dx; p4c[x % 4]++;
+          }
+          if (y + 4 < sh && valid[i + 4 * sw] && Math.abs(lum[i + 4 * sw] - lum[i]) > 6) {
+            totalPairDiffs++;
+            if (dy <= 1.2) zeroDiffCount++;
+            p2[y % 2] += dy; p2c[y % 2]++;
+            p3[y % 3] += dy; p3c[y % 3]++;
+            p4arr[y % 4] += dy; p4c[y % 4]++;
+          }
+        }
+      }
+
+      let repFactor = 1.0;
+      if (totalPairDiffs >= 80) {
+        const evalPeriod = (sums, counts) => {
+          let maxM = 0;
+          let minM = 1e9;
+          for (let k = 0; k < sums.length; k++) {
+            if (counts[k] < 15) return 1.0;
+            const m = sums[k] / counts[k];
+            if (m > maxM) maxM = m;
+            if (m < minM) minM = m;
+          }
+          return maxM / Math.max(0.2, minM);
+        };
+        const r2 = evalPeriod(p2, p2c);
+        const r3 = evalPeriod(p3, p3c);
+        const r4 = evalPeriod(p4arr, p4c);
+        let bestK = 1;
+        let bestScore = 2.15;
+        if (r4 >= bestScore) { bestK = 4; bestScore = r4; }
+        if (r3 >= bestScore && r3 > r4 * 0.92) { bestK = 3; bestScore = r3; }
+        if (r2 >= bestScore && r2 > r3 * 1.15 && r2 > r4 * 1.05) { bestK = 2; }
+
+        if (bestK > 1) {
+          repFactor = bestK;
+        } else {
+          const zRatio = zeroDiffCount / totalPairDiffs;
+          if (zRatio > 0.44) {
+            repFactor = Math.max(1.0, Math.min(5.0, 1 / Math.max(0.2, 1 - Math.max(0, zRatio - 0.18))));
+          }
+        }
+      }
+
+      // 2. Spatial bandwidth / soft-upscaling estimator (Laplacian octave ratio)
+      let l1Sum = 0, l2Sum = 0, l4Sum = 0, texCnt = 0;
+      for (let y = 4; y < sh - 4; y++) {
+        const row = y * sw;
+        for (let x = 4; x < sw - 4; x++) {
+          const i = row + x;
+          if (!valid[i - 4] || !valid[i + 4] || !valid[i - 4 * sw] || !valid[i + 4 * sw]) continue;
+          const span = Math.abs(lum[i + 4] - lum[i - 4]) + Math.abs(lum[i + 4 * sw] - lum[i - 4 * sw]);
+          if (span < 16) continue;
+          const l1 =
+            Math.abs(2 * lum[i] - lum[i - 1] - lum[i + 1]) +
+            Math.abs(2 * lum[i] - lum[i - sw] - lum[i + sw]);
+          const l2 =
+            Math.abs(2 * lum[i] - lum[i - 2] - lum[i + 2]) +
+            Math.abs(2 * lum[i] - lum[i - 2 * sw] - lum[i + 2 * sw]);
+          const l4 =
+            Math.abs(2 * lum[i] - lum[i - 4] - lum[i + 4]) +
+            Math.abs(2 * lum[i] - lum[i - 4 * sw] - lum[i + 4 * sw]);
+          l1Sum += l1;
+          l2Sum += l2;
+          l4Sum += l4;
+          texCnt++;
+        }
+      }
+
+      let blurPitch = 1.0;
+      if (texCnt >= 40 && l2Sum > 1e-3 && l4Sum > 1e-3) {
+        const r12 = l1Sum / l2Sum;
+        if (r12 < 0.36) {
+          blurPitch = Math.max(1.0, Math.min(4.5, 0.36 / Math.max(0.07, r12)));
+        }
+      }
+
+      const effectivePitch = Math.max(repFactor, blurPitch);
+      return {
+        effectivePitch,
+        repFactor,
+        blurPitch,
+        isBlocky: repFactor >= 1.32,
+        effW: Math.max(1, Math.round(W / effectivePitch)),
+        effH: Math.max(1, Math.round(H / effectivePitch)),
+        nominalW: W,
+        nominalH: H,
+      };
+    } catch (_) {
+      return baseResult;
+    }
+  }
+
+  /**
+   * Matches effective pixel density & replicated-pixel texture of `img2AlignedCanvas` to `img1Canvas`,
+   * preserving the exact alpha channel of `img2AlignedCanvas` (no transparent edge halos).
+   *
+   * @param {HTMLCanvasElement} img2AlignedCanvas
+   * @param {HTMLCanvasElement} img1Canvas
+   * @param {Uint8Array | null} [faceMask1=null]
+   * @param {ReturnType<typeof analyzeEffectivePixelDensity> | null} [cachedD1=null]
+   * @returns {{
+   *   canvas: HTMLCanvasElement,
+   *   adjusted: boolean,
+   *   mode: string,
+   *   d1: ReturnType<typeof analyzeEffectivePixelDensity>,
+   *   d2: ReturnType<typeof analyzeEffectivePixelDensity>
+   * }}
+   */
+  function matchCanvasPixelDensity(
+    img2AlignedCanvas,
+    img1Canvas,
+    faceMask1 = null,
+    cachedD1 = null
+  ) {
+    const W = img2AlignedCanvas.width;
+    const H = img2AlignedCanvas.height;
+    const d1 = cachedD1 || analyzeEffectivePixelDensity(img1Canvas, faceMask1);
+    const d2 = analyzeEffectivePixelDensity(img2AlignedCanvas, faceMask1);
+
+    const ratio = d2.effectivePitch / Math.max(0.1, d1.effectivePitch);
+    if (ratio >= 0.88 && ratio <= 1.13) {
+      return { canvas: img2AlignedCanvas, adjusted: false, mode: 'matched', d1, d2 };
+    }
+
+    const srcCtx = img2AlignedCanvas.getContext('2d', { willReadFrequently: true });
+    if (!srcCtx) {
+      return { canvas: img2AlignedCanvas, adjusted: false, mode: 'matched', d1, d2 };
+    }
+    const origAlpha = new Uint8Array(W * H);
+    const origData = srcCtx.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < origAlpha.length; i++) origAlpha[i] = origData[i * 4 + 3];
+
+    if (d1.effectivePitch > d2.effectivePitch * 1.13) {
+      // img1 has lower effective density (soft or replicated pixels) -> bring img2 down to match img1
+      const factor = Math.max(1.1, Math.min(5.0, d1.effectivePitch / d2.effectivePitch));
+      const tw = Math.max(16, Math.round(W / factor));
+      const th = Math.max(16, Math.round(H / factor));
+      const low = createCanvas(tw, th);
+      const lCtx = low.getContext('2d');
+      const out = createCanvas(W, H);
+      const oCtx = out.getContext('2d', { willReadFrequently: true });
+      if (!lCtx || !oCtx) {
+        releaseCanvas(low);
+        releaseCanvas(out);
+        return { canvas: img2AlignedCanvas, adjusted: false, mode: 'matched', d1, d2 };
+      }
+      lCtx.imageSmoothingEnabled = true;
+      lCtx.imageSmoothingQuality = 'high';
+      lCtx.drawImage(img2AlignedCanvas, 0, 0, tw, th);
+
+      oCtx.imageSmoothingEnabled = !d1.isBlocky;
+      if (!d1.isBlocky) oCtx.imageSmoothingQuality = 'high';
+      oCtx.drawImage(low, 0, 0, W, H);
+      releaseCanvas(low);
+
+      // Restore exact original alpha mask cleanly
+      const outImg = oCtx.getImageData(0, 0, W, H);
+      const od = outImg.data;
+      for (let i = 0; i < origAlpha.length; i++) {
+        od[i * 4 + 3] = origAlpha[i];
+      }
+      oCtx.putImageData(outImg, 0, 0);
+      return {
+        canvas: out,
+        adjusted: true,
+        mode: d1.isBlocky ? 'match-blocky' : 'match-soft',
+        d1,
+        d2,
+      };
+    }
+
+    // img2 has lower effective density (e.g. replicated pixel blocks) than crisp img1 -> de-replicate + micro-sharpen
+    const out = createCanvas(W, H);
+    const oCtx = out.getContext('2d', { willReadFrequently: true });
+    if (!oCtx) {
+      releaseCanvas(out);
+      return { canvas: img2AlignedCanvas, adjusted: false, mode: 'matched', d1, d2 };
+    }
+
+    if (d2.isBlocky && d2.repFactor >= 1.3) {
+      const tw = Math.max(16, Math.round(W / d2.repFactor));
+      const th = Math.max(16, Math.round(H / d2.repFactor));
+      const tmp = createCanvas(tw, th);
+      const tCtx = tmp.getContext('2d');
+      if (tCtx) {
+        tCtx.imageSmoothingEnabled = true;
+        tCtx.imageSmoothingQuality = 'high';
+        tCtx.drawImage(img2AlignedCanvas, 0, 0, tw, th);
+        oCtx.imageSmoothingEnabled = true;
+        oCtx.imageSmoothingQuality = 'high';
+        oCtx.drawImage(tmp, 0, 0, W, H);
+      } else {
+        oCtx.drawImage(img2AlignedCanvas, 0, 0, W, H);
+      }
+      releaseCanvas(tmp);
+    } else {
+      oCtx.drawImage(img2AlignedCanvas, 0, 0, W, H);
+    }
+
+    // Gentle edge-aware luminance micro-sharpen clamped to +/-26 (zero rings/halos)
+    const amount = Math.max(0.15, Math.min(0.65, (ratio - 1) * 0.42));
+    const outImg = oCtx.getImageData(0, 0, W, H);
+    const od = outImg.data;
+    const srcCopy = new Uint8ClampedArray(od);
+    const rad = d2.isBlocky ? Math.max(1, Math.round(d2.repFactor * 0.6)) : 1;
+
+    for (let y = rad; y < H - rad; y++) {
+      const row = y * W;
+      for (let x = rad; x < W - rad; x++) {
+        const i = row + x;
+        const a = origAlpha[i];
+        const p4 = i * 4;
+        od[p4 + 3] = a;
+        if (a < 128) continue;
+
+        const r0 = srcCopy[p4], g0 = srcCopy[p4 + 1], b0 = srcCopy[p4 + 2];
+        const y0 = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+        const pL = (i - rad) * 4, pR = (i + rad) * 4;
+        const pU = (i - rad * W) * 4, pD = (i + rad * W) * 4;
+        const yAvg =
+          0.25 *
+          (0.299 * (srcCopy[pL] + srcCopy[pR] + srcCopy[pU] + srcCopy[pD]) +
+            0.587 * (srcCopy[pL + 1] + srcCopy[pR + 1] + srcCopy[pU + 1] + srcCopy[pD + 1]) +
+            0.114 * (srcCopy[pL + 2] + srcCopy[pR + 2] + srcCopy[pU + 2] + srcCopy[pD + 2]));
+        const delta = Math.max(-26, Math.min(26, (y0 - yAvg) * amount));
+        od[p4] = Math.max(0, Math.min(255, Math.round(r0 + delta)));
+        od[p4 + 1] = Math.max(0, Math.min(255, Math.round(g0 + delta)));
+        od[p4 + 2] = Math.max(0, Math.min(255, Math.round(b0 + delta)));
+      }
+    }
+
+    // Preserve alpha on outer border rows/cols as well
+    for (let i = 0; i < origAlpha.length; i++) od[i * 4 + 3] = origAlpha[i];
+    oCtx.putImageData(outImg, 0, 0);
+
+    return {
+      canvas: out,
+      adjusted: true,
+      mode: d2.isBlocky ? 'dereplicate-sharpen' : 'sharpen',
+      d1,
+      d2,
+    };
   }
 
   /**
@@ -1509,6 +1903,8 @@
     readImageFromClipboardAPI,
     computeFittedPlacement,
     renderFittedWithPadding,
+    analyzeEffectivePixelDensity,
+    matchCanvasPixelDensity,
     isolateByMask,
     uniteByComplementaryMask,
     buildFinalImage,

@@ -25,7 +25,7 @@
     { id: 'obsidian-mono', name: 'Preto + Prata', sub: 'Minimalista Puro', accent: '#f4f4f5', accent2: '#a1a1aa', themeColor: '#000000' },
   ];
 
-  const APP_VERSION = 'v3.3';
+  const APP_VERSION = 'v3.4';
   const ACTIVE_PROJECT_KEY = 'sm_active_project_id';
   const RESUME_GUARD_KEY = 'sm_resume_guard';
 
@@ -99,6 +99,11 @@
     // --- Step 2: imagem2 (Padding transparente + ajuste manual + isolar face) ---
     /** @type {LoadedImage | null} */
     img2: null,
+    matchImg2Density: true,
+    /** @type {any} */
+    img1DensityInfo: null,
+    /** @type {any} */
+    img2DensityResult: null,
     /** @type {LayerTransform} */
     img2Transform: { x: 0, y: 0, scale: 1, rotation: 0 },
     img2OnionOpacity: 0.35,
@@ -219,9 +224,28 @@
     imgPostCanvas: null,
     /** @type {HTMLCanvasElement | null} */
     skinMaskPreviewCanvas: null,
+    /** @type {HTMLCanvasElement | null} */
+    _step6PreviewCanvas: null,
+    /** @type {HTMLCanvasElement | null} */
+    _step6PreviewMaskCanvas: null,
     /** @type {SkinDiagnostics | null} */
     skinDiagnostics: null,
   };
+
+  /** Cached ~420px Stage 6 interactive preview inputs for 60fps mobile slider drags */
+  let _step6PreviewCache = null;
+  let _step6DraggingPreview = false;
+
+  function releaseStep6PreviewCache() {
+    _step6DraggingPreview = false;
+    setStateCanvas('_step6PreviewCanvas', null);
+    setStateCanvas('_step6PreviewMaskCanvas', null);
+    if (_step6PreviewCache) {
+      Ops.releaseCanvas(_step6PreviewCache.finalSmall);
+      Ops.releaseCanvas(_step6PreviewCache.img1Small);
+      _step6PreviewCache = null;
+    }
+  }
 
   /** Lazy recomputation dirty flags — avoids cascading expensive steps during live drags */
   const dirtySteps = {
@@ -725,6 +749,9 @@
       state.edtCustomOutSq = null;
       state.edtCustomInSq = null;
     }
+    if (targetStep !== 6) {
+      releaseStep6PreviewCache();
+    }
     return released;
   }
 
@@ -914,13 +941,15 @@
   }
 
   /**
-   * Recomputes normalized/padded imagem2 and its isolated Face using the SAME selection & role from imagem1.
+   * Recomputes normalized/padded imagem2, optional pixel-density match to imagem1,
+   * and isolates its Face using the SAME selection & role from imagem1.
    */
-  function recomputeStep2Outputs(markDownstream = true) {
+  function recomputeStep2Outputs(markDownstream = true, applyDensity = true) {
     dirtySteps[2] = false;
     if (!state.img1Canvas || !state.img2) {
       setStateCanvas('img2AlignedCanvas', null);
       state.img2Placement = null;
+      state.img2DensityResult = null;
       setStateCanvas('face2Canvas', null);
       if (markDownstream) markDirtyFrom(3, true);
       return;
@@ -930,13 +959,33 @@
     const H = state.img1Canvas.height;
     const fullBox = { x: 0, y: 0, w: W, h: H };
 
-    const { canvas, placement } = Ops.renderFittedWithPadding(
+    let { canvas, placement } = Ops.renderFittedWithPadding(
       state.img2,
       fullBox,
       W,
       H,
       state.img2Transform
     );
+
+    if (applyDensity && state.matchImg2Density) {
+      if (!state.img1DensityInfo) {
+        state.img1DensityInfo = Ops.analyzeEffectivePixelDensity(state.img1Canvas, state.faceMask1);
+      }
+      const dRes = Ops.matchCanvasPixelDensity(
+        canvas,
+        state.img1Canvas,
+        state.faceMask1,
+        state.img1DensityInfo
+      );
+      if (dRes.adjusted && dRes.canvas !== canvas) {
+        Ops.releaseCanvas(canvas);
+        canvas = dRes.canvas;
+      }
+      state.img2DensityResult = dRes;
+    } else if (!state.matchImg2Density) {
+      state.img2DensityResult = null;
+    }
+
     setStateCanvas('img2AlignedCanvas', canvas);
     state.img2Placement = placement;
 
@@ -960,7 +1009,7 @@
   function recomputeStep3Outputs(rebuildMergeBase = true, markDownstream = true) {
     dirtySteps[3] = false;
     dirtySteps.step3RebuildBase = false;
-    if (!state.img1Canvas || !state.corpo1Canvas || !state.face2Canvas || !state.faceMask1) {
+    if (!state.img1Canvas || !state.faceMask1 || !state.img2) {
       setStateCanvas('imgMergeCanvas', null);
       state.mergeFaceMask = null;
       state.edtMergeInsideSq = null;
@@ -976,6 +1025,18 @@
     const H = state.img1Canvas.height;
 
     if (rebuildMergeBase || !state.imgMergeCanvas) {
+      if (!state.corpo1Canvas) {
+        setStateCanvas('corpo1Canvas', Ops.isolateByMask(state.img1Canvas, state.faceMask1, 0));
+      }
+      if (!state.face2Canvas) {
+        recomputeStep2Outputs(false, true);
+      }
+      if (!state.corpo1Canvas || !state.face2Canvas) {
+        setStateCanvas('imgMergeCanvas', null);
+        state.mergeFaceMask = null;
+        if (markDownstream) markDirtyFrom(4);
+        return;
+      }
       setStateCanvas(
         'imgMergeCanvas',
         Ops.uniteByComplementaryMask(state.face2Canvas, state.corpo1Canvas, state.faceMask1)
@@ -1089,22 +1150,126 @@
   }
 
   function ensureFinalUnblendedCanvas() {
-    if (
-      !state.imgFinalUnblendedCanvas &&
-      state.facePrecisaCanvas &&
-      state.corpoSemBordasCanvas &&
-      state.mergeFaceMask
-    ) {
-      setStateCanvas(
-        'imgFinalUnblendedCanvas',
-        Ops.uniteByComplementaryMask(
-          state.facePrecisaCanvas,
-          state.corpoSemBordasCanvas,
-          state.mergeFaceMask
-        )
-      );
+    if (!state.imgFinalUnblendedCanvas && state.img1Canvas && state.imgRefined && state.mergeFaceMask) {
+      if (!state.facePrecisaCanvas || !state.corpoSemBordasCanvas) {
+        ensureStepComputed(4);
+      }
+      if (state.facePrecisaCanvas && state.corpoSemBordasCanvas && state.mergeFaceMask) {
+        setStateCanvas(
+          'imgFinalUnblendedCanvas',
+          Ops.uniteByComplementaryMask(
+            state.facePrecisaCanvas,
+            state.corpoSemBordasCanvas,
+            state.mergeFaceMask
+          )
+        );
+        if (state.activeStep === 6 && isLowMemMobile()) {
+          pruneMemoryForStep(6);
+        }
+      }
     }
     return state.imgFinalUnblendedCanvas;
+  }
+
+  /**
+   * Builds or reuses a cached ~420px preview dataset for silky 60fps Step 6 slider drags.
+   */
+  function ensureStep6PreviewCache() {
+    if (!state.imgFinalCanvas || !state.img1Canvas || !state.mergeFaceMask) return null;
+    if (
+      _step6PreviewCache &&
+      _step6PreviewCache.sourceFinalCanvas === state.imgFinalCanvas &&
+      _step6PreviewCache.mergeFaceMaskRef === state.mergeFaceMask
+    ) {
+      return _step6PreviewCache;
+    }
+    releaseStep6PreviewCache();
+
+    const W = state.imgFinalCanvas.width;
+    const H = state.imgFinalCanvas.height;
+    const maxDim = Math.max(W, H);
+    const scale = maxDim <= 460 ? 1 : 420 / maxDim;
+    const pw = Math.max(16, Math.round(W * scale));
+    const ph = Math.max(16, Math.round(H * scale));
+
+    const makeSmall = (srcC) => {
+      const c = Ops.createCanvas(pw, ph);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'medium';
+        ctx.drawImage(srcC, 0, 0, pw, ph);
+      }
+      return c;
+    };
+
+    const downsampleMaskNearest = (mask) => {
+      if (!mask) return null;
+      const out = new Uint8Array(pw * ph);
+      for (let y = 0; y < ph; y++) {
+        const sy = Math.min(H - 1, Math.floor((y + 0.5) / scale));
+        const sRow = sy * W;
+        const dRow = y * pw;
+        for (let x = 0; x < pw; x++) {
+          const sx = Math.min(W - 1, Math.floor((x + 0.5) / scale));
+          out[dRow + x] = mask[sRow + sx];
+        }
+      }
+      return out;
+    };
+
+    const finalSmall = makeSmall(state.imgFinalCanvas);
+    const img1Small = makeSmall(state.img1Canvas);
+    const mergeMaskSmall = /** @type {Uint8Array} */ (downsampleMaskNearest(state.mergeFaceMask));
+    const origMaskSmall = downsampleMaskNearest(state.faceMask1);
+    const edtSmall = Geo.computeEDT2DSq(mergeMaskSmall, 0, pw, ph);
+
+    _step6PreviewCache = {
+      sourceFinalCanvas: state.imgFinalCanvas,
+      mergeFaceMaskRef: state.mergeFaceMask,
+      scale,
+      pw,
+      ph,
+      finalSmall,
+      img1Small,
+      mergeMaskSmall,
+      origMaskSmall,
+      edtSmall,
+    };
+    return _step6PreviewCache;
+  }
+
+  /**
+   * Executes fast ~420px Stage 6 preview during active slider dragging (~8ms per frame).
+   */
+  function runStep6FastPreview() {
+    const cache = ensureStep6PreviewCache();
+    if (!cache) return;
+    const s = cache.scale;
+    const scalePts = (pts) => pts.map((p) => ({ x: p.x * s, y: p.y * s }));
+    const scaledOpts = {
+      ...state.skinPost,
+      seamEqualizePx: Math.max(2, Math.round((state.skinPost.seamEqualizePx || 36) * s)),
+    };
+
+    setStateCanvas('_step6PreviewCanvas', null);
+    setStateCanvas('_step6PreviewMaskCanvas', null);
+
+    const res = SkinPost.applySkinPostProcess({
+      inputFinalCanvas: cache.finalSmall,
+      origImg1Canvas: cache.img1Small,
+      mergeFaceMask: cache.mergeMaskSmall,
+      origFaceMask1: cache.origMaskSmall,
+      edtToOutsideSq: cache.edtSmall,
+      faceSamples: scalePts(state.skinSamplesFace),
+      bodySamples: scalePts(state.skinSamplesBody),
+      options: scaledOpts,
+      generateMaskPreview: state.step6View === 'skin-mask',
+    });
+
+    setStateCanvas('_step6PreviewCanvas', res.canvas);
+    setStateCanvas('_step6PreviewMaskCanvas', res.maskPreviewCanvas);
+    state.skinDiagnostics = res.diagnostics;
   }
 
   /**
@@ -1113,6 +1278,7 @@
    */
   function recomputeStep5Outputs(markDownstream = true) {
     dirtySteps[5] = false;
+    releaseStep6PreviewCache();
     // Free previous Step 5 outputs BEFORE allocating new full-res canvas buffers
     setStateCanvas('imgFinalCanvas', null);
     setStateCanvas('imgFinalUnblendedCanvas', null);
@@ -1184,6 +1350,9 @@
    */
   function recomputeStep6Outputs() {
     dirtySteps[6] = false;
+    _step6DraggingPreview = false;
+    setStateCanvas('_step6PreviewCanvas', null);
+    setStateCanvas('_step6PreviewMaskCanvas', null);
     // Free previous Step 6 output buffers BEFORE allocating new canvases
     setStateCanvas('imgPostCanvas', null);
     setStateCanvas('skinMaskPreviewCanvas', null);
@@ -1411,7 +1580,7 @@
       };
       updateSidebarLiveValues();
       const apply2 = () => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, !isDragging);
         syncViewportScene();
         if (!isDragging) updateSidebarThumbnails();
       };
@@ -1485,6 +1654,9 @@
       const dimChanged =
         !state.img1 || state.img1.width !== loaded.width || state.img1.height !== loaded.height;
       state.img1 = loaded;
+      state.img1DensityInfo = null;
+      state.img2DensityResult = null;
+      releaseStep6PreviewCache();
       setStateCanvas('img1Canvas', Ops.sourceToCanvas(loaded.img));
       if (!state.currentProjectName) {
         state.currentProjectName = (loaded.name || 'Projeto').replace(/\.[^.]+$/, '');
@@ -1918,7 +2090,16 @@
         });
       }
 
-      if (!state.imgPostCanvas || !state.imgFinalCanvas) {
+      const postCanvas =
+        _step6DraggingPreview && state._step6PreviewCanvas
+          ? state._step6PreviewCanvas
+          : state.imgPostCanvas;
+      const maskPrevCanvas =
+        _step6DraggingPreview && state._step6PreviewMaskCanvas
+          ? state._step6PreviewMaskCanvas
+          : state.skinMaskPreviewCanvas;
+
+      if (!postCanvas || !state.imgFinalCanvas) {
         viewport.mode = 'view';
         rs.primaryCanvas = state.imgMergeCanvas || null;
         rs.emptyHintTitle = 'Conclua até a imagemFinal (Etapa 5) para igualar o tom de pele';
@@ -1926,7 +2107,7 @@
           'O pós-processamento analisa e iguala cientificamente a pele da Face × Corpo';
       } else if (state.step6View === 'compare-pre' && !isSampling) {
         viewport.mode = 'compare';
-        rs.primaryCanvas = state.imgPostCanvas;
+        rs.primaryCanvas = postCanvas;
         rs.compareBeforeCanvas = state.imgFinalCanvas;
         rs.compareLabelBefore = 'Antes: imagemFinal (Pré-Pós)';
         rs.compareLabelAfter = 'Depois: Tom de Pele Igualado';
@@ -1937,28 +2118,28 @@
         !isSampling
       ) {
         viewport.mode = 'compare';
-        rs.primaryCanvas = state.imgPostCanvas;
+        rs.primaryCanvas = postCanvas;
         rs.compareBeforeCanvas = state.imgFinalUnblendedCanvas;
         rs.compareLabelBefore = 'Antes: Corte Seco (Bruto)';
         rs.compareLabelAfter = 'Depois: Merge + Pós de Pele';
         rs.compareRatio = state.compareRatio;
       } else if (state.step6View === 'compare-img1' && state.img1Canvas && !isSampling) {
         viewport.mode = 'compare';
-        rs.primaryCanvas = state.imgPostCanvas;
+        rs.primaryCanvas = postCanvas;
         rs.compareBeforeCanvas = state.img1Canvas;
         rs.compareLabelBefore = 'Antes: imagem1 (Original)';
         rs.compareLabelAfter = 'Depois: Pós de Pele';
         rs.compareRatio = state.compareRatio;
-      } else if (state.step6View === 'skin-mask' && state.skinMaskPreviewCanvas) {
+      } else if (state.step6View === 'skin-mask' && maskPrevCanvas) {
         viewport.mode = isSampling ? 'sample' : 'pan';
-        rs.primaryCanvas = state.skinMaskPreviewCanvas;
+        rs.primaryCanvas = maskPrevCanvas;
         if (state.showGuides && state.selection1) {
           rs.guideCutPath = state.selection1.cutPath;
           rs.guideIsLasso = state.selection1.type === 'lasso';
         }
       } else {
         viewport.mode = isSampling ? 'sample' : 'pan';
-        rs.primaryCanvas = state.imgPostCanvas;
+        rs.primaryCanvas = postCanvas;
       }
 
       if (state.step6Tool === 'sample-face') {
@@ -1988,11 +2169,11 @@
     /** @type {{ id: 1 | 2 | 3 | 4 | 5 | 6, num: string, label: string, done: boolean }[]} */
     const steps = [
       { id: 1, num: '1', label: 'img1 • Corpo', done: !!(state.img1 && state.faceMask1) },
-      { id: 2, num: '2', label: 'img2 • Face', done: !!(state.img2 && (state.face2Canvas || dirtySteps[2])) },
-      { id: 3, num: '3', label: 'Merge • Bordas', done: !!(state.imgMergeCanvas || (state.img2 && state.faceMask1)) },
-      { id: 4, num: '4', label: 'IA • Precisa', done: !!(state.imgRefined && (state.facePrecisaCanvas || dirtySteps[4])) },
-      { id: 5, num: '5', label: 'imgFinal', done: !!(state.imgFinalCanvas || (state.imgRefined && dirtySteps[5])) },
-      { id: 6, num: '6', label: 'Pós • Pele', done: !!(state.skinPost.enabled && (state.imgPostCanvas || (state.imgRefined && dirtySteps[6]))) },
+      { id: 2, num: '2', label: 'img2 • Face', done: !!(state.img2 && state.faceMask1) },
+      { id: 3, num: '3', label: 'Merge • Bordas', done: !!(state.img2 && state.faceMask1) },
+      { id: 4, num: '4', label: 'IA • Precisa', done: !!(state.imgRefined && state.mergeFaceMask) },
+      { id: 5, num: '5', label: 'imgFinal', done: !!(state.imgFinalCanvas || (state.imgRefined && state.mergeFaceMask)) },
+      { id: 6, num: '6', label: 'Pós • Pele', done: !!(state.skinPost.enabled && (state.imgPostCanvas || (state.imgRefined && state.mergeFaceMask))) },
     ];
 
     stepperNav.innerHTML = '';
@@ -2329,11 +2510,15 @@
    * Helper to get the canvas to export for (face + bordas imprecisas) honoring full vs cropped mode.
    */
   function getFaceImprecisaExportCanvas() {
-    if (!state.faceImprecisaCanvas) return null;
-    if (state.exportCroppedMode && state.mergeFaceBox) {
-      return Ops.cropCanvas(state.faceImprecisaCanvas, state.mergeFaceBox);
+    let base = state.faceImprecisaCanvas;
+    if (!base && state.imgMergeCanvas && state.mergeFaceMask) {
+      base = Ops.isolateByMask(state.imgMergeCanvas, state.mergeFaceMask, 1);
     }
-    return state.faceImprecisaCanvas;
+    if (!base) return null;
+    if (state.exportCroppedMode && state.mergeFaceBox) {
+      return Ops.cropCanvas(base, state.mergeFaceBox);
+    }
+    return base;
   }
 
   function renderSidebar() {
@@ -2588,6 +2773,21 @@
       ? `<span class="badge ${hasDiffRatio ? 'amber' : 'emerald'}">${state.img2.width}×${state.img2.height}</span>`
       : `<span class="badge">Pendente</span>`;
 
+    const dRes = state.img2DensityResult;
+    const densityStatusText = !state.matchImg2Density
+      ? 'Desativado'
+      : dRes && dRes.adjusted
+      ? dRes.mode === 'dereplicate-sharpen'
+        ? `Replicação ~${dRes.d2.repFactor.toFixed(1)}× corrigida`
+        : dRes.mode === 'match-blocky'
+        ? `Ajustada p/ blocos img1 (~${dRes.d1.effW}px)`
+        : `Ajustada p/ ${dRes.d1.effW}×${dRes.d1.effH}px`
+      : dRes
+      ? 'Densidade compatível'
+      : state.img2
+      ? 'Pronto'
+      : 'Aguardando';
+
     sidebarContent.innerHTML = `
       <div class="panel-card highlight-cyan">
         <div class="card-header">
@@ -2598,6 +2798,13 @@
           <button class="btn btn-primary btn-sm" style="flex:1" id="sbImportImg2">📂 Escolher imagem2</button>
           <button class="btn btn-sm" style="flex:1" id="sbPasteImg2">📋 Colar (Ctrl+V)</button>
         </div>
+        <label class="checkbox-row" style="margin:2px 0 0;justify-content:space-between">
+          <span style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="chkMatchImg2Density" ${state.matchImg2Density ? 'checked' : ''} />
+            <span>Igualar densidade de pixel à img1</span>
+          </span>
+          <span class="badge ${dRes && dRes.adjusted ? 'cyan' : ''}" id="badgeDensityStatus">${densityStatusText}</span>
+        </label>
       </div>
 
       <div class="panel-card">
@@ -2672,25 +2879,43 @@
             <div class="piece-title"><span>Face (img2)</span><span class="badge cyan">Face</span></div>
             <div class="piece-thumb-wrap" id="thumbFace2"></div>
             <div class="piece-actions">
-              <button class="btn" id="copyFace2" ${!state.face2Canvas ? 'disabled' : ''}>📋 Copiar</button>
-              <button class="btn" id="dlFace2" ${!state.face2Canvas ? 'disabled' : ''}>⬇ Salvar</button>
+              <button class="btn" id="copyFace2" ${!(state.face2Canvas || (state.img2 && state.faceMask1)) ? 'disabled' : ''}>📋 Copiar</button>
+              <button class="btn" id="dlFace2" ${!(state.face2Canvas || (state.img2 && state.faceMask1)) ? 'disabled' : ''}>⬇ Salvar</button>
             </div>
           </div>
           <div class="piece-card">
             <div class="piece-title"><span>img2 c/ Padding</span></div>
             <div class="piece-thumb-wrap" id="thumbImg2Pad"></div>
             <div class="piece-actions">
-              <button class="btn" id="copyImg2Pad" ${!state.img2AlignedCanvas ? 'disabled' : ''}>📋 Copiar</button>
-              <button class="btn" id="dlImg2Pad" ${!state.img2AlignedCanvas ? 'disabled' : ''}>⬇ Salvar</button>
+              <button class="btn" id="copyImg2Pad" ${!(state.img2AlignedCanvas || state.img2) ? 'disabled' : ''}>📋 Copiar</button>
+              <button class="btn" id="dlImg2Pad" ${!(state.img2AlignedCanvas || state.img2) ? 'disabled' : ''}>⬇ Salvar</button>
             </div>
           </div>
         </div>
       </div>
 
-      <button class="btn btn-primary btn-block" id="sbNextTo3" ${!(state.face2Canvas && state.corpo1Canvas) ? 'disabled' : ''}>
+      ${
+        state.img2 && !state.faceMask1
+          ? `<div class="panel-card" style="border-color:rgba(245,158,11,0.45);background:rgba(245,158,11,0.08)">
+              <div style="font-size:11.5px;color:#fbbf24;font-weight:600">⚠ Falta fazer o corte (Corpo vs Face) na imagem1 antes de avançar.</div>
+              <button class="btn btn-amber btn-xs" id="btnGoCutStep1">✂ Ir cortar na Etapa 1</button>
+            </div>`
+          : ''
+      }
+
+      <button class="btn btn-primary btn-block" id="sbNextTo3" ${!(state.img1Canvas && state.img2 && state.faceMask1) ? 'disabled' : ''}>
         Unir Corpo + Face → Etapa 3 (imagemMerge) →
       </button>
     `;
+
+    const chkDens = /** @type {HTMLInputElement | null} */ (document.getElementById('chkMatchImg2Density'));
+    chkDens?.addEventListener('change', () => {
+      state.matchImg2Density = chkDens.checked;
+      recomputeStep2Outputs(true, true);
+      syncAllUI();
+      scheduleAutoSaveProject(500);
+    });
+    document.getElementById('btnGoCutStep1')?.addEventListener('click', () => navigateToStep(1));
 
     document.getElementById('sbImportImg2')?.addEventListener('click', () => {
       if (isLowMemMobile()) pruneMemoryForStep(state.activeStep);
@@ -2722,12 +2947,12 @@
       state.img2Transform.scale = Math.max(0.1, Number(rngScale.value) / 100);
       updateSidebarLiveValues();
       scheduleLiveRecompute(() => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, false);
         syncViewportScene();
       });
     });
     rngScale?.addEventListener('change', () => {
-      recomputeStep2Outputs();
+      recomputeStep2Outputs(true, true);
       syncViewportScene();
       updateSidebarThumbnails();
       scheduleAutoSaveProject();
@@ -2743,12 +2968,12 @@
         state.img2Transform.scale = val / 100;
         updateSidebarLiveValues();
         scheduleLiveRecompute(() => {
-          recomputeStep2Outputs();
+          recomputeStep2Outputs(true, false);
           syncViewportScene();
         });
       },
       onCommit: () => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, true);
         syncViewportScene();
         updateSidebarThumbnails();
         scheduleAutoSaveProject();
@@ -2760,12 +2985,12 @@
       state.img2Transform.rotation = Number(rngRot.value) || 0;
       updateSidebarLiveValues();
       scheduleLiveRecompute(() => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, false);
         syncViewportScene();
       });
     });
     rngRot?.addEventListener('change', () => {
-      recomputeStep2Outputs();
+      recomputeStep2Outputs(true, true);
       syncViewportScene();
       updateSidebarThumbnails();
       scheduleAutoSaveProject();
@@ -2781,12 +3006,12 @@
         state.img2Transform.rotation = val;
         updateSidebarLiveValues();
         scheduleLiveRecompute(() => {
-          recomputeStep2Outputs();
+          recomputeStep2Outputs(true, false);
           syncViewportScene();
         });
       },
       onCommit: () => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, true);
         syncViewportScene();
         updateSidebarThumbnails();
         scheduleAutoSaveProject();
@@ -2835,12 +3060,12 @@
         state.img2Transform.x = val;
         updateSidebarLiveValues();
         scheduleLiveRecompute(() => {
-          recomputeStep2Outputs();
+          recomputeStep2Outputs(true, false);
           syncViewportScene();
         });
       },
       onCommit: () => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, true);
         syncViewportScene();
         updateSidebarThumbnails();
         scheduleAutoSaveProject();
@@ -2856,12 +3081,12 @@
         state.img2Transform.y = val;
         updateSidebarLiveValues();
         scheduleLiveRecompute(() => {
-          recomputeStep2Outputs();
+          recomputeStep2Outputs(true, false);
           syncViewportScene();
         });
       },
       onCommit: () => {
-        recomputeStep2Outputs();
+        recomputeStep2Outputs(true, true);
         syncViewportScene();
         updateSidebarThumbnails();
         scheduleAutoSaveProject();
@@ -3015,7 +3240,7 @@
         </div>
       </div>
 
-      <button class="btn btn-primary btn-block" id="sbNextTo4" ${!state.faceImprecisaCanvas ? 'disabled' : ''}>
+      <button class="btn btn-primary btn-block" id="sbNextTo4" ${!(state.img1Canvas && state.img2 && state.faceMask1 && (state.faceImprecisaCanvas || state.mergeFaceMask)) ? 'disabled' : ''}>
         Ir para Etapa 4: IA → Face + Bordas Precisas →
       </button>
     `;
@@ -3130,7 +3355,7 @@
           ${state.imgRefined ? `<span class="badge emerald">${state.imgRefined.width}×${state.imgRefined.height}</span>` : `<span class="badge">Pendente</span>`}
         </div>
         <div class="btn-row">
-          <button class="btn btn-sm btn-ghost" style="flex:1.2" id="sbQuickCopyImp" ${!state.faceImprecisaCanvas ? 'disabled' : ''}>
+          <button class="btn btn-sm btn-ghost" style="flex:1.2" id="sbQuickCopyImp" ${!(state.imgMergeCanvas && state.mergeFaceMask) ? 'disabled' : ''}>
             📋 Copiar p/ IA
           </button>
           <button class="btn btn-primary btn-sm" style="flex:1" id="sbImportRefined">📂 Abrir</button>
@@ -3216,7 +3441,7 @@
         </div>
       </div>
 
-      <button class="btn btn-emerald btn-block" id="sbNextTo5" ${!(state.facePrecisaCanvas && state.corpoSemBordasCanvas) ? 'disabled' : ''}>
+      <button class="btn btn-emerald btn-block" id="sbNextTo5" ${!(state.img1Canvas && state.imgRefined && state.mergeFaceMask) ? 'disabled' : ''}>
         ✨ Ver imagemFinal (União Completa) →
       </button>
     `;
@@ -3414,7 +3639,7 @@
       : 'Pendente';
 
     const fm = state.finalMerge;
-    const disabledAttr = !state.facePrecisaCanvas ? 'disabled' : '';
+    const disabledAttr = !(state.imgFinalCanvas || (state.img1Canvas && state.imgRefined && state.mergeFaceMask)) ? 'disabled' : '';
 
     /** @type {{ id: FinalMergeMode, title: string, sub: string, span2?: boolean }[]} */
     const techniques = [
@@ -3644,23 +3869,28 @@
   }
 
   let _step6RafPending = false;
-  let _step6DebounceTimer = 0;
-  function scheduleStep6LiveUpdate() {
+  let _step6CommitTimer = 0;
+  function commitStep6FullRes() {
+    clearTimeout(_step6CommitTimer);
+    _step6DraggingPreview = false;
+    recomputeStep6Outputs();
+    syncViewportScene();
     updateSidebarLiveValues();
-    if (isLowMemMobile()) {
-      clearTimeout(_step6DebounceTimer);
-      _step6DebounceTimer = window.setTimeout(() => {
-        recomputeStep6Outputs();
-        syncViewportScene();
-        updateSidebarLiveValues();
-      }, 180);
-      return;
-    }
+    updateSidebarThumbnails();
+    scheduleAutoSaveProject(600);
+  }
+
+  function scheduleStep6LiveUpdate() {
+    _step6DraggingPreview = true;
+    updateSidebarLiveValues();
+    clearTimeout(_step6CommitTimer);
+    _step6CommitTimer = window.setTimeout(commitStep6FullRes, 420);
     if (_step6RafPending) return;
     _step6RafPending = true;
     requestAnimationFrame(() => {
       _step6RafPending = false;
-      recomputeStep6Outputs();
+      if (!_step6DraggingPreview) return;
+      runStep6FastPreview();
       syncViewportScene();
       updateSidebarLiveValues();
     });
@@ -3976,10 +4206,8 @@
         scheduleStep6LiveUpdate();
       });
       el.addEventListener('change', () => {
-        recomputeStep6Outputs();
-        syncViewportScene();
-        updateSidebarLiveValues();
-        updateSidebarThumbnails();
+        applyVal(Number(el.value));
+        commitStep6FullRes();
       });
     };
 
@@ -5202,6 +5430,7 @@
           version: 2,
           selection1: state.selection1,
           faceIsOne1: state.faceIsOne1,
+          matchImg2Density: state.matchImg2Density,
           img2Transform: { ...state.img2Transform },
           img2OnionOpacity: state.img2OnionOpacity,
           mergeRegionMode: state.mergeRegionMode,
@@ -5343,6 +5572,7 @@
       state.img2Transform = m.img2Transform
         ? { ...m.img2Transform }
         : { x: 0, y: 0, scale: 1, rotation: 0 };
+      state.matchImg2Density = m.matchImg2Density !== undefined ? !!m.matchImg2Density : true;
       state.img2OnionOpacity = m.img2OnionOpacity ?? 0.35;
       state.mergeRegionMode = m.mergeRegionMode || 'expand';
       state.expandPx = m.expandPx ?? 36;
@@ -5821,6 +6051,9 @@
     viewport.cancelActiveStroke();
     state.activeStep = 1;
     state.img1 = null;
+    state.img1DensityInfo = null;
+    state.img2DensityResult = null;
+    releaseStep6PreviewCache();
     setStateCanvas('img1Canvas', null);
     state.selection1 = null;
     state.prevSelection1 = null;
