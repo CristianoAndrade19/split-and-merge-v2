@@ -25,7 +25,9 @@
     { id: 'obsidian-mono', name: 'Preto + Prata', sub: 'Minimalista Puro', accent: '#f4f4f5', accent2: '#a1a1aa', themeColor: '#000000' },
   ];
 
+  const APP_VERSION = 'v3.3';
   const ACTIVE_PROJECT_KEY = 'sm_active_project_id';
+  const RESUME_GUARD_KEY = 'sm_resume_guard';
 
   /** @type {AppSettings & { settingsVersion?: number }} */
   const DEFAULT_SETTINGS = {
@@ -35,8 +37,8 @@
     loupeZoom: 3.0,
     loupeSize: 132,
     autoSaveHistory: true,
-    mobileMaxEdge: 2048,
-    settingsVersion: 3,
+    mobileMaxEdge: 1440,
+    settingsVersion: 4,
   };
 
   function generateProjectId() {
@@ -811,7 +813,9 @@
     if (targetStep >= 5) {
       const needStep5 =
         dirtySteps[5] ||
-        (!!state.imgRefined && (!state.imgFinalCanvas || !state.imgFinalUnblendedCanvas));
+        (!!state.imgRefined &&
+          (!state.imgFinalCanvas ||
+            (state.step5View === 'compare-raw' && !state.imgFinalUnblendedCanvas)));
       if (needStep5) {
         recomputeStep5Outputs(dirtySteps[5]);
       }
@@ -820,7 +824,9 @@
     if (targetStep >= 6) {
       const needStep6 =
         dirtySteps[6] ||
-        (!!state.imgFinalCanvas && (!state.imgPostCanvas || !state.skinMaskPreviewCanvas));
+        (!!state.imgFinalCanvas &&
+          (!state.imgPostCanvas ||
+            (state.step6View === 'skin-mask' && !state.skinMaskPreviewCanvas)));
       if (needStep6) {
         recomputeStep6Outputs();
       }
@@ -1082,38 +1088,67 @@
     if (markDownstream) markDirtyFrom(5);
   }
 
+  function ensureFinalUnblendedCanvas() {
+    if (
+      !state.imgFinalUnblendedCanvas &&
+      state.facePrecisaCanvas &&
+      state.corpoSemBordasCanvas &&
+      state.mergeFaceMask
+    ) {
+      setStateCanvas(
+        'imgFinalUnblendedCanvas',
+        Ops.uniteByComplementaryMask(
+          state.facePrecisaCanvas,
+          state.corpoSemBordasCanvas,
+          state.mergeFaceMask
+        )
+      );
+    }
+    return state.imgFinalUnblendedCanvas;
+  }
+
   /**
    * Recomputes imagemFinal = (face + bordas precisas) + (corpo sem bordas imprecisas)
    * with the selected seam & skin-tone merge technique.
    */
   function recomputeStep5Outputs(markDownstream = true) {
     dirtySteps[5] = false;
+    // Free previous Step 5 outputs BEFORE allocating new full-res canvas buffers
+    setStateCanvas('imgFinalCanvas', null);
+    setStateCanvas('imgFinalUnblendedCanvas', null);
+
     if (
       !state.facePrecisaCanvas ||
       !state.corpoSemBordasCanvas ||
       !state.mergeFaceMask ||
       !state.img1Canvas
     ) {
-      setStateCanvas('imgFinalUnblendedCanvas', null);
-      setStateCanvas('imgFinalCanvas', null);
       if (markDownstream) markDirtyFrom(6);
       return;
     }
-
-    const unblended = Ops.uniteByComplementaryMask(
-      state.facePrecisaCanvas,
-      state.corpoSemBordasCanvas,
-      state.mergeFaceMask
-    );
-    setStateCanvas('imgFinalUnblendedCanvas', unblended);
 
     const fm = state.finalMerge;
     const needsAdvanced = fm.mode !== 'none' || fm.colorMatchStrength > 0.001;
 
     if (!needsAdvanced) {
+      const unblended = Ops.uniteByComplementaryMask(
+        state.facePrecisaCanvas,
+        state.corpoSemBordasCanvas,
+        state.mergeFaceMask
+      );
+      setStateCanvas('imgFinalUnblendedCanvas', unblended);
       setStateCanvas('imgFinalCanvas', unblended);
       if (markDownstream) markDirtyFrom(6);
       return;
+    }
+
+    if (!isLowMemMobile() || state.step5View === 'compare-raw') {
+      const unblended = Ops.uniteByComplementaryMask(
+        state.facePrecisaCanvas,
+        state.corpoSemBordasCanvas,
+        state.mergeFaceMask
+      );
+      setStateCanvas('imgFinalUnblendedCanvas', unblended);
     }
 
     const W = state.img1Canvas.width;
@@ -1149,9 +1184,11 @@
    */
   function recomputeStep6Outputs() {
     dirtySteps[6] = false;
+    // Free previous Step 6 output buffers BEFORE allocating new canvases
+    setStateCanvas('imgPostCanvas', null);
+    setStateCanvas('skinMaskPreviewCanvas', null);
+
     if (!state.imgFinalCanvas || !state.img1Canvas || !state.mergeFaceMask) {
-      setStateCanvas('imgPostCanvas', null);
-      setStateCanvas('skinMaskPreviewCanvas', null);
       state.skinDiagnostics = null;
       return;
     }
@@ -1174,6 +1211,7 @@
       faceSamples: state.skinSamplesFace,
       bodySamples: state.skinSamplesBody,
       options: state.skinPost,
+      generateMaskPreview: state.step6View === 'skin-mask',
     });
 
     setStateCanvas('imgPostCanvas', res.canvas);
@@ -2182,6 +2220,7 @@
       });
       addPill('↔ vs Corte Seco', state.step5View === 'compare-raw', () => {
         state.step5View = 'compare-raw';
+        ensureFinalUnblendedCanvas();
         syncViewportScene();
         renderStageToolbar();
       });
@@ -2209,6 +2248,9 @@
       });
       addPill('👁 Mapa de Pele', state.step6View === 'skin-mask', () => {
         state.step6View = 'skin-mask';
+        if (!state.skinMaskPreviewCanvas && state.imgFinalCanvas) {
+          recomputeStep6Outputs();
+        }
         syncAllUI();
       });
       addPill('🎯 Amostrar Face', state.step6Tool === 'sample-face', () => {
@@ -3346,8 +3388,17 @@
   }
 
   let _step5RafPending = false;
+  let _step5DebounceTimer = 0;
   function scheduleStep5LiveUpdate() {
     updateSidebarLiveValues();
+    if (isLowMemMobile()) {
+      clearTimeout(_step5DebounceTimer);
+      _step5DebounceTimer = window.setTimeout(() => {
+        recomputeStep5Outputs();
+        syncViewportScene();
+      }, 180);
+      return;
+    }
     if (_step5RafPending) return;
     _step5RafPending = true;
     requestAnimationFrame(() => {
@@ -3578,6 +3629,7 @@
     });
     document.getElementById('segCmpRaw')?.addEventListener('click', () => {
       state.step5View = 'compare-raw';
+      ensureFinalUnblendedCanvas();
       syncAllUI();
     });
     document.getElementById('segCmpMerge')?.addEventListener('click', () => {
@@ -3592,8 +3644,18 @@
   }
 
   let _step6RafPending = false;
+  let _step6DebounceTimer = 0;
   function scheduleStep6LiveUpdate() {
     updateSidebarLiveValues();
+    if (isLowMemMobile()) {
+      clearTimeout(_step6DebounceTimer);
+      _step6DebounceTimer = window.setTimeout(() => {
+        recomputeStep6Outputs();
+        syncViewportScene();
+        updateSidebarLiveValues();
+      }, 180);
+      return;
+    }
     if (_step6RafPending) return;
     _step6RafPending = true;
     requestAnimationFrame(() => {
@@ -4040,10 +4102,14 @@
       document.getElementById('segS6Raw')?.addEventListener('click', () => {
         state.step6Tool = 'pan';
         state.step6View = 'compare-raw';
+        ensureFinalUnblendedCanvas();
         syncAllUI();
       });
       document.getElementById('segS6Mask')?.addEventListener('click', () => {
         state.step6View = 'skin-mask';
+        if (!state.skinMaskPreviewCanvas && state.imgFinalCanvas) {
+          recomputeStep6Outputs();
+        }
         syncAllUI();
       });
     }
@@ -5106,13 +5172,14 @@
         ? await loadedToStoredBytesCached(state.imgRefined)
         : null;
       const finalTarget = state.imgPostCanvas || state.imgFinalCanvas;
-      const finalBytes = finalTarget
-        ? await Storage.canvasToStoredBytes(
-            finalTarget,
-            isLowMemMobile() ? 'image/jpeg' : 'image/png',
-            0.94
-          )
-        : null;
+      const finalBytes =
+        finalTarget && !(silent && isLowMemMobile())
+          ? await Storage.canvasToStoredBytes(
+              finalTarget,
+              isLowMemMobile() ? 'image/jpeg' : 'image/png',
+              0.9
+            )
+          : null;
       const mask1Bytes =
         state.selection1 && state.selection1.type === 'auto-face' && state.rawMask1
           ? await maskToStoredBytes(state.rawMask1, state.img1Canvas.width, state.img1Canvas.height)
@@ -5188,7 +5255,7 @@
   /**
    * Opens a project saved in IndexedDB (supports both iOS-safe ArrayBuffer records and legacy Blobs).
    * @param {string} id
-   * @param {{ autoResume?: boolean }} [opts]
+   * @param {{ autoResume?: boolean, maxStep?: number, safeNotice?: string }} [opts]
    */
   async function openStoredProject(id, opts = {}) {
     if (!Storage) return false;
@@ -5319,10 +5386,15 @@
       state.skinSamplesBody = Array.isArray(m.skinSamplesBody) ? m.skinSamplesBody : [];
 
       /** @type {1 | 2 | 3 | 4 | 5 | 6} */
-      const targetStep =
+      const savedStep =
         metaRecord.activeStep >= 1 && metaRecord.activeStep <= 6
           ? /** @type {1|2|3|4|5|6} */ (metaRecord.activeStep)
           : 1;
+      /** @type {1 | 2 | 3 | 4 | 5 | 6} */
+      const targetStep =
+        opts.maxStep && opts.maxStep >= 1 && opts.maxStep <= 6
+          ? /** @type {1|2|3|4|5|6} */ (Math.min(savedStep, opts.maxStep))
+          : savedStep;
       state.activeStep = targetStep;
       recomputeStep1Outputs(targetStep >= 3, true);
       ensureStepComputed(targetStep);
@@ -5336,9 +5408,10 @@
       setActiveView('studio');
       syncAllUI();
       showToast(
-        isAuto
-          ? 'Projeto em andamento restaurado automaticamente!'
-          : `Projeto "${state.currentProjectName}" reaberto do disco!`
+        opts.safeNotice ||
+          (isAuto
+            ? 'Projeto em andamento restaurado automaticamente!'
+            : `Projeto "${state.currentProjectName}" reaberto do disco!`)
       );
       return true;
     } catch (err) {
@@ -5559,8 +5632,11 @@
       <div class="view-inner">
         <div class="view-header">
           <div>
-            <h1 class="view-title">Configurações &amp; Temas</h1>
-            <p class="view-subtitle">Preferências persistidas em disco local (IndexedDB) • interface otimizada em preto obsidian</p>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <h1 class="view-title">Configurações &amp; Temas</h1>
+              <span class="badge cyan" id="appVersionBadge">${APP_VERSION}</span>
+            </div>
+            <p class="view-subtitle">Split &amp; Merge Studio ${APP_VERSION} • preferências persistidas em disco local (IndexedDB)</p>
           </div>
           <button class="btn btn-sm" id="btnSetToStudio">🎨 Voltar ao Estúdio</button>
         </div>
@@ -5621,9 +5697,10 @@
                 <span class="badge cyan">${Number(cfg.mobileMaxEdge) > 0 ? `${cfg.mobileMaxEdge} px` : 'Original'}</span>
               </div>
               <select id="selSetMobileMaxEdge" class="input-select">
-                <option value="1600" ${Number(cfg.mobileMaxEdge) === 1600 ? 'selected' : ''}>1600 px — Ultra leve (iPhone/Mobile)</option>
-                <option value="2048" ${Number(cfg.mobileMaxEdge ?? 2048) === 2048 ? 'selected' : ''}>2048 px — Recomendado Mobile</option>
-                <option value="2560" ${Number(cfg.mobileMaxEdge) === 2560 ? 'selected' : ''}>2560 px — Alta definição</option>
+                <option value="1280" ${Number(cfg.mobileMaxEdge) === 1280 ? 'selected' : ''}>1280 px — Ultra Seguro (iPhone)</option>
+                <option value="1440" ${Number(cfg.mobileMaxEdge ?? 1440) === 1440 ? 'selected' : ''}>1440 px — Recomendado Mobile</option>
+                <option value="1800" ${Number(cfg.mobileMaxEdge) === 1800 ? 'selected' : ''}>1800 px — Alta definição</option>
+                <option value="2048" ${Number(cfg.mobileMaxEdge) === 2048 ? 'selected' : ''}>2048 px — Máximo Mobile</option>
                 <option value="0" ${Number(cfg.mobileMaxEdge) === 0 ? 'selected' : ''}>Original — Sem redução (maior uso de RAM)</option>
               </select>
             </div>
@@ -5709,7 +5786,7 @@
     );
     selMobileMax?.addEventListener('change', () => {
       state.appSettings.mobileMaxEdge = Number(selMobileMax.value) || 0;
-      state.appSettings.settingsVersion = 3;
+      state.appSettings.settingsVersion = 4;
       if (Storage) Storage.saveSettings(state.appSettings).catch(() => {});
       renderSettingsView();
       showToast(
@@ -5988,8 +6065,14 @@
           state.appSettings.mobileMaxEdge = DEFAULT_SETTINGS.mobileMaxEdge;
           needsMigrateSave = true;
         }
-        if (needsMigrateSave || (state.appSettings.settingsVersion || 0) < 3) {
-          state.appSettings.settingsVersion = 3;
+        if ((state.appSettings.settingsVersion || 0) < 4) {
+          if (state.appSettings.mobileMaxEdge === 2048) {
+            state.appSettings.mobileMaxEdge = 1440;
+          }
+          needsMigrateSave = true;
+        }
+        if (needsMigrateSave) {
+          state.appSettings.settingsVersion = 4;
           Storage.saveSettings(state.appSettings).catch(() => {});
         }
       } catch (_) {
@@ -6021,7 +6104,55 @@
         lastActiveId = localStorage.getItem(ACTIVE_PROJECT_KEY);
       } catch (_) {}
       if (lastActiveId) {
-        await openStoredProject(lastActiveId, { autoResume: true });
+        let guard = null;
+        try {
+          const rawG = localStorage.getItem(RESUME_GUARD_KEY);
+          if (rawG) guard = JSON.parse(rawG);
+        } catch (_) {}
+
+        const recentGuard =
+          guard && typeof guard.ts === 'number' && Date.now() - guard.ts < 25000 ? guard : null;
+
+        if (recentGuard && recentGuard.count >= 2) {
+          try {
+            localStorage.removeItem(RESUME_GUARD_KEY);
+          } catch (_) {}
+          showToast(
+            'Modo seguro ativado — reabra seu projeto quando quiser na aba Histórico.',
+            true
+          );
+        } else if (recentGuard && recentGuard.count === 1) {
+          try {
+            localStorage.setItem(
+              RESUME_GUARD_KEY,
+              JSON.stringify({ ts: Date.now(), count: 2 })
+            );
+          } catch (_) {}
+          await openStoredProject(lastActiveId, {
+            autoResume: true,
+            maxStep: 1,
+            safeNotice:
+              'Recuperação segura ativada — projeto restaurado na Etapa 1. Avance pela barra superior.',
+          });
+          setTimeout(() => {
+            try {
+              localStorage.removeItem(RESUME_GUARD_KEY);
+            } catch (_) {}
+          }, 1500);
+        } else {
+          try {
+            localStorage.setItem(
+              RESUME_GUARD_KEY,
+              JSON.stringify({ ts: Date.now(), count: 1 })
+            );
+          } catch (_) {}
+          await openStoredProject(lastActiveId, { autoResume: true });
+          setTimeout(() => {
+            try {
+              localStorage.removeItem(RESUME_GUARD_KEY);
+            } catch (_) {}
+          }, 1500);
+        }
       }
     }
   })();

@@ -352,21 +352,22 @@
 
   /**
    * Computes Oklab mean, 3x3 covariance, and mean RGB from either:
-   *  - User-clicked sample points (7x7 patches), OR
-   *  - Automatically detected skin pixels in the region!
+   *  - User-clicked sample points (9x9 patches), OR
+   *  - Stratified subsampled skin pixels in the region (up to ~45k samples, zero full-image Oklab buffer!).
    *
    * @param {Uint8ClampedArray} rgba
-   * @param {Float32Array} oklab (W*H*3)
    * @param {Uint8Array} regionMask (W*H, 1 = belongs to this region)
    * @param {Point[]} manualPoints
    * @param {number} W
    * @param {number} H
    */
-  function extractSkinDistribution(rgba, oklab, regionMask, manualPoints, W, H) {
-    /** @type {number[]} */
-    const indices = [];
-    /** @type {number[]} */
-    const weights = [];
+  function extractSkinDistribution(rgba, regionMask, manualPoints, W, H) {
+    const MAX_SAMPLES = 65536;
+    const rawIndices = new Int32Array(MAX_SAMPLES);
+    const rawWeights = new Float32Array(MAX_SAMPLES);
+    const tmpOk = new Float32Array(3);
+    let sampleLen = 0;
+    let strideUsed = 1;
 
     if (manualPoints && manualPoints.length > 0) {
       const patchR = 4;
@@ -381,37 +382,48 @@
             if (x < 0 || x >= W) continue;
             const idx = y * W + x;
             if (rgba[idx * 4 + 3] < 128) continue;
-            indices.push(idx);
-            weights.push(1.0);
+            if (sampleLen < MAX_SAMPLES) {
+              rawIndices[sampleLen] = idx;
+              rawWeights[sampleLen] = 1.0;
+              sampleLen++;
+            }
           }
         }
       }
     }
 
-    // Automatic skin detection if no manual points
-    if (indices.length === 0) {
+    // Automatic stratified skin detection if no manual points
+    if (sampleLen === 0) {
       const n = W * H;
-      for (let i = 0; i < n; i++) {
-        if (regionMask[i] !== 1) continue;
-        const p4 = i * 4;
-        if (rgba[p4 + 3] < 128) continue;
-        const i3 = i * 3;
-        const s = priorSkinScore(
-          rgba[p4],
-          rgba[p4 + 1],
-          rgba[p4 + 2],
-          oklab[i3],
-          oklab[i3 + 1],
-          oklab[i3 + 2]
-        );
-        if (s > 0.25) {
-          indices.push(i);
-          weights.push(s);
+      strideUsed = Math.max(1, Math.floor(Math.sqrt(n / 45000)));
+      for (let y = 0; y < H; y += strideUsed) {
+        const row = y * W;
+        for (let x = 0; x < W; x += strideUsed) {
+          const i = row + x;
+          if (regionMask[i] !== 1) continue;
+          const p4 = i * 4;
+          if (rgba[p4 + 3] < 128) continue;
+          const r = rgba[p4];
+          const g = rgba[p4 + 1];
+          const b = rgba[p4 + 2];
+          rgbToOklabInto(r, g, b, tmpOk, 0);
+          const s = priorSkinScore(r, g, b, tmpOk[0], tmpOk[1], tmpOk[2]);
+          if (s > 0.25) {
+            rawIndices[sampleLen] = i;
+            rawWeights[sampleLen] = s;
+            sampleLen++;
+            if (sampleLen >= MAX_SAMPLES) break;
+          }
         }
+        if (sampleLen >= MAX_SAMPLES) break;
       }
     }
 
-    if (indices.length < 8) {
+    const indices = rawIndices.subarray(0, sampleLen);
+    const weights = rawWeights.subarray(0, sampleLen);
+    const estimatedCount = sampleLen * strideUsed * strideUsed;
+
+    if (sampleLen < 8) {
       return {
         valid: false,
         count: 0,
@@ -421,7 +433,6 @@
         meanRgb: /** @type {[number, number, number]} */ ([220, 185, 160]),
         indices,
         weights,
-        oklabBuf: oklab,
         rgbaBuf: rgba,
       };
     }
@@ -430,31 +441,35 @@
     let mL = 0, mA = 0, mB = 0;
     let mR = 0, mG = 0, mBl = 0;
 
-    for (let k = 0; k < indices.length; k++) {
+    for (let k = 0; k < sampleLen; k++) {
       const idx = indices[k];
       const w = weights[k];
-      const i3 = idx * 3;
       const p4 = idx * 4;
+      const r = rgba[p4];
+      const g = rgba[p4 + 1];
+      const b = rgba[p4 + 2];
+      rgbToOklabInto(r, g, b, tmpOk, 0);
       wSum += w;
-      mL += w * oklab[i3];
-      mA += w * oklab[i3 + 1];
-      mB += w * oklab[i3 + 2];
-      mR += w * rgba[p4];
-      mG += w * rgba[p4 + 1];
-      mBl += w * rgba[p4 + 2];
+      mL += w * tmpOk[0];
+      mA += w * tmpOk[1];
+      mB += w * tmpOk[2];
+      mR += w * r;
+      mG += w * g;
+      mBl += w * b;
     }
 
     mL /= wSum; mA /= wSum; mB /= wSum;
     mR /= wSum; mG /= wSum; mBl /= wSum;
 
     const cov = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-    for (let k = 0; k < indices.length; k++) {
+    for (let k = 0; k < sampleLen; k++) {
       const idx = indices[k];
       const w = weights[k];
-      const i3 = idx * 3;
-      const d0 = oklab[i3] - mL;
-      const d1 = oklab[i3 + 1] - mA;
-      const d2 = oklab[i3 + 2] - mB;
+      const p4 = idx * 4;
+      rgbToOklabInto(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], tmpOk, 0);
+      const d0 = tmpOk[0] - mL;
+      const d1 = tmpOk[1] - mA;
+      const d2 = tmpOk[2] - mB;
       cov[0] += w * d0 * d0;
       cov[1] += w * d0 * d1;
       cov[2] += w * d0 * d2;
@@ -470,7 +485,7 @@
 
     return {
       valid: true,
-      count: indices.length,
+      count: estimatedCount,
       meanOk: [mL, mA, mB],
       covOk: cov,
       stdOk: [
@@ -485,39 +500,39 @@
       ]),
       indices,
       weights,
-      oklabBuf: oklab,
       rgbaBuf: rgba,
     };
   }
 
   /**
-   * Builds a smooth spatial skin-selectivity mask W_skin in [0..1] for pixels in targetMask,
-   * protecting sclera/teeth, irises, lipstick, dark hair, and clothes!
+   * Builds a compact Uint8Array [0..255] skin-selectivity mask for pixels in targetMask,
+   * protecting sclera/teeth, irises, lipstick, dark hair, and clothes.
    *
    * @param {Uint8ClampedArray} rgba
-   * @param {Float32Array} oklab
    * @param {Uint8Array} targetMask
    * @param {ReturnType<typeof extractSkinDistribution>} srcDist
    * @param {number} selectivity01 0 = affect entire piece, 1 = strict skin only
    * @param {boolean} protectFeatures Protect eyes, sclera, lips, dark hair
    * @param {number} W
    * @param {number} H
+   * @param {Uint8Array | null} [scratchTmp]
+   * @returns {Uint8Array}
    */
   function buildSelectiveSkinMask(
     rgba,
-    oklab,
     targetMask,
     srcDist,
     selectivity01,
     protectFeatures,
     W,
-    H
+    H,
+    scratchTmp = null
   ) {
     const n = W * H;
-    const mask = new Float32Array(n);
+    const mask = new Uint8Array(n);
 
     if (selectivity01 <= 0.01 && !protectFeatures) {
-      for (let i = 0; i < n; i++) mask[i] = targetMask[i] === 1 ? 1 : 0;
+      for (let i = 0; i < n; i++) mask[i] = targetMask[i] === 1 ? 255 : 0;
       return mask;
     }
 
@@ -525,70 +540,70 @@
     const [sL, sA, sB] = srcDist.stdOk;
     const meanChroma = Math.hypot(mA, mB);
 
-    // Wider tolerance at lower selectivity, tighter Mahalanobis gate at higher selectivity
     const scaleTol = 3.6 - selectivity01 * 2.1; // [1.5 .. 3.6]
     const denomL = Math.max(0.14, sL * 2.6 * scaleTol);
     const denomA = Math.max(0.022, sA * 2.2 * scaleTol);
     const denomB = Math.max(0.026, sB * 2.2 * scaleTol);
+    const tmpOk = new Float32Array(3);
 
     for (let i = 0; i < n; i++) {
       if (targetMask[i] !== 1) continue;
       const p4 = i * 4;
       if (rgba[p4 + 3] < 32) continue;
 
-      const i3 = i * 3;
-      const L = oklab[i3];
-      const A = oklab[i3 + 1];
-      const B = oklab[i3 + 2];
+      const r = rgba[p4];
+      const g = rgba[p4 + 1];
+      const b = rgba[p4 + 2];
+      rgbToOklabInto(r, g, b, tmpOk, 0);
+      const L = tmpOk[0];
+      const A = tmpOk[1];
+      const B = tmpOk[2];
 
       let w = 1.0;
 
       if (selectivity01 > 0.01) {
         const dMah = Math.hypot((L - mL) / denomL, (A - mA) / denomA, (B - mB) / denomB);
         const wCluster = 1 - smoothstep(0.85, 1.85, dMah);
-        const wPrior = priorSkinScore(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], L, A, B);
-        // Blend cluster match with universal skin locus so shaded skin is still captured
+        const wPrior = priorSkinScore(r, g, b, L, A, B);
         const combined = Math.max(wCluster * 0.9, Math.min(1, wCluster * 0.55 + wPrior * 0.65));
         w = 1 - selectivity01 + selectivity01 * combined;
       }
 
       if (protectFeatures) {
         const c = Math.hypot(A, B);
-        // 1. Sclera (eye whites) & teeth protection
         if (meanChroma > 0.022 && c < 0.016 && L > 0.76) {
           w *= smoothstep(0.016, 0.005, 0.016 - c) * 0.1;
         }
-        // 2. Lipstick / vermilion protection (excessive red-magenta vs skin mean)
         if (A - mA > 0.036 && A > 0.058) {
           w *= 1 - smoothstep(0.036, 0.065, A - mA);
         }
-        // 3. Dark pupils / eyelashes / dark hair protection
         if (L < 0.24) {
           w *= smoothstep(0.14, 0.24, L);
         }
-        // 4. Cool blue/green eyes & cool clothing protection (negative b or negative a)
         if (B < 0.002 || A < -0.004) {
           const coolDist = Math.max(0.002 - B, -0.004 - A);
           w *= 1 - smoothstep(0, 0.025, coolDist);
         }
       }
 
-      mask[i] = Math.max(0, Math.min(1, w));
+      mask[i] = Math.max(0, Math.min(255, Math.round(w * 255)));
     }
 
-    // Fast separable 5-tap box/tent feather [1,2,3,2,1]/9 so skin mask transitions are silky smooth
-    const tmp = new Float32Array(n);
+    // Separable 5-tap box/tent feather [1,2,3,2,1]/9 using compact Uint8Array scratch buffer
+    const tmp = scratchTmp && scratchTmp.length === n ? scratchTmp : new Uint8Array(n);
     for (let y = 0; y < H; y++) {
       const row = y * W;
       for (let x = 0; x < W; x++) {
         const xm2 = Math.max(0, x - 2), xm1 = Math.max(0, x - 1);
         const xp1 = Math.min(W - 1, x + 1), xp2 = Math.min(W - 1, x + 2);
-        tmp[row + x] =
+        tmp[row + x] = Math.round(
           (mask[row + xm2] +
             2 * mask[row + xm1] +
             3 * mask[row + x] +
             2 * mask[row + xp1] +
-            mask[row + xp2]) / 9;
+            mask[row + xp2]) /
+            9
+        );
       }
     }
     for (let y = 0; y < H; y++) {
@@ -599,8 +614,10 @@
         if (targetMask[y0 + x] !== 1) {
           mask[y0 + x] = 0;
         } else {
-          mask[y0 + x] =
-            (tmp[ym2 + x] + 2 * tmp[ym1 + x] + 3 * tmp[y0 + x] + 2 * tmp[yp1 + x] + tmp[yp2 + x]) / 9;
+          mask[y0 + x] = Math.round(
+            (tmp[ym2 + x] + 2 * tmp[ym1 + x] + 3 * tmp[y0 + x] + 2 * tmp[yp1 + x] + tmp[yp2 + x]) /
+              9
+          );
         }
       }
     }
@@ -614,34 +631,40 @@
 
   /**
    * Builds a 256-entry monotone CDF / Quantile transfer LUT mapping source values in [minV, maxV]
-   * onto target distribution quantiles.
+   * onto target distribution quantiles, computing Oklab inline from RGBA buffers.
    *
-   * @param {Float32Array} oklab
+   * @param {Uint8ClampedArray} srcRgba
+   * @param {Uint8ClampedArray} tgtRgba
    * @param {number} chan 0, 1, or 2
-   * @param {number[]} srcIndices
-   * @param {number[]} tgtIndices
+   * @param {Int32Array} srcIndices
+   * @param {Int32Array} tgtIndices
    * @param {number} minV
    * @param {number} maxV
    */
-  function buildChannelQuantileLUT(srcOklab, tgtOklab, chan, srcIndices, tgtIndices, minV, maxV) {
+  function buildChannelQuantileLUT(srcRgba, tgtRgba, chan, srcIndices, tgtIndices, minV, maxV) {
     const bins = 256;
     const rawS = new Float64Array(bins);
     const rawT = new Float64Array(bins);
     const scale = (bins - 1) / (maxV - minV);
     const stepV = (maxV - minV) / (bins - 1);
+    const tmpOk = new Float32Array(3);
 
     let minBinS = bins - 1, maxBinS = 0;
     let minBinT = bins - 1, maxBinT = 0;
 
     for (let i = 0; i < srcIndices.length; i++) {
-      const v = srcOklab[srcIndices[i] * 3 + chan];
+      const p4 = srcIndices[i] * 4;
+      rgbToOklabInto(srcRgba[p4], srcRgba[p4 + 1], srcRgba[p4 + 2], tmpOk, 0);
+      const v = tmpOk[chan];
       const b = Math.max(0, Math.min(bins - 1, Math.round((v - minV) * scale)));
       rawS[b] += 1;
       if (b < minBinS) minBinS = b;
       if (b > maxBinS) maxBinS = b;
     }
     for (let i = 0; i < tgtIndices.length; i++) {
-      const v = tgtOklab[tgtIndices[i] * 3 + chan];
+      const p4 = tgtIndices[i] * 4;
+      rgbToOklabInto(tgtRgba[p4], tgtRgba[p4 + 1], tgtRgba[p4 + 2], tmpOk, 0);
+      const v = tmpOk[chan];
       const b = Math.max(0, Math.min(bins - 1, Math.round((v - minV) * scale)));
       rawT[b] += 1;
       if (b < minBinT) minBinT = b;
@@ -786,20 +809,22 @@
 
   /**
    * Computes 3-Zone (Shadows / Midtones / Highlights) Oklab means for Lift/Gamma/Gain transfer.
-   * @param {Float32Array} oklab
-   * @param {number[]} indices
+   * @param {Uint8ClampedArray} rgbaBuf
+   * @param {Int32Array} indices
    * @param {number} medianL
    */
-  function computeThreeZoneStats(oklab, indices, medianL) {
+  function computeThreeZoneStats(rgbaBuf, indices, medianL) {
     const zones = [
       { sum: [0, 0, 0], w: 0 }, // Shadows
       { sum: [0, 0, 0], w: 0 }, // Midtones
       { sum: [0, 0, 0], w: 0 }, // Highlights
     ];
+    const tmpOk = new Float32Array(3);
 
     for (let k = 0; k < indices.length; k++) {
-      const i3 = indices[k] * 3;
-      const L = oklab[i3], A = oklab[i3 + 1], B = oklab[i3 + 2];
+      const p4 = indices[k] * 4;
+      rgbToOklabInto(rgbaBuf[p4], rgbaBuf[p4 + 1], rgbaBuf[p4 + 2], tmpOk, 0);
+      const L = tmpOk[0], A = tmpOk[1], B = tmpOk[2];
       const wShad = 1 - smoothstep(medianL - 0.12, medianL + 0.02, L);
       const wHigh = smoothstep(medianL - 0.02, medianL + 0.12, L);
       const wMid = Math.max(0.05, 1 - Math.abs(L - medianL) / 0.14);
@@ -822,7 +847,7 @@
 
   /**
    * Applies Stage 6 Skin Color Post-Processing to imagemFinalCanvas so the skin color
-   * of the two versions (Face vs Body) matches seamlessly.
+   * of the two versions (Face vs Body) matches seamlessly, with minimal peak RAM for iOS Safari.
    *
    * @param {{
    *   inputFinalCanvas: HTMLCanvasElement,
@@ -832,11 +857,12 @@
    *   edtToOutsideSq: Float32Array | null,
    *   faceSamples: Point[],
    *   bodySamples: Point[],
-   *   options: SkinPostOptions
+   *   options: SkinPostOptions,
+   *   generateMaskPreview?: boolean
    * }} params
    * @returns {{
    *   canvas: HTMLCanvasElement,
-   *   maskPreviewCanvas: HTMLCanvasElement,
+   *   maskPreviewCanvas: HTMLCanvasElement | null,
    *   diagnostics: SkinDiagnostics
    * }}
    */
@@ -850,6 +876,7 @@
       faceSamples,
       bodySamples,
       options,
+      generateMaskPreview = true,
     } = params;
 
     const Ops = global.SplitMergeImageOps;
@@ -858,13 +885,13 @@
     const n = W * H;
 
     const outCanvas = Ops.createCanvas(W, H);
-    const maskPreviewCanvas = Ops.createCanvas(W, H);
+    const maskPreviewCanvas = generateMaskPreview ? Ops.createCanvas(W, H) : null;
     const inCtx = inputFinalCanvas.getContext('2d', { willReadFrequently: true });
     const origCtx = origImg1Canvas.getContext('2d', { willReadFrequently: true });
     const outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
-    const maskCtx = maskPreviewCanvas.getContext('2d');
+    const maskCtx = maskPreviewCanvas ? maskPreviewCanvas.getContext('2d') : null;
 
-    if (!inCtx || !origCtx || !outCtx || !maskCtx) {
+    if (!inCtx || !origCtx || !outCtx || (maskPreviewCanvas && !maskCtx)) {
       return {
         canvas: inputFinalCanvas,
         maskPreviewCanvas,
@@ -884,32 +911,32 @@
 
     const srcImgData = inCtx.getImageData(0, 0, W, H);
     const rgba = srcImgData.data;
-    const origRgba = origCtx.getImageData(0, 0, W, H).data;
 
-    // Precompute Oklab for current final image & original image1
-    const oklab = new Float32Array(n * 3);
-    const origOklab = new Float32Array(n * 3);
-    for (let i = 0; i < n; i++) {
-      const p4 = i * 4;
-      rgbToOklabInto(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], oklab, i * 3);
-      rgbToOklabInto(origRgba[p4], origRgba[p4 + 1], origRgba[p4 + 2], origOklab, i * 3);
-    }
+    /** @type {Uint8ClampedArray | null} */
+    let origRgbaCache = null;
+    const getOrigRgba = () => {
+      if (!origRgbaCache) {
+        origRgbaCache = origCtx.getImageData(0, 0, W, H).data;
+      }
+      return origRgbaCache;
+    };
 
     // Visible body mask in final image (mergeFaceMask === 0)
     const bodyRegionMask = new Uint8Array(n);
-    // Authoritative original body + neck mask in imagem1 (origFaceMask1 === 0)
-    const origBodyFullMask = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       bodyRegionMask[i] = mergeFaceMask[i] === 0 ? 1 : 0;
-      origBodyFullMask[i] = origFaceMask1 ? (origFaceMask1[i] === 0 ? 1 : 0) : bodyRegionMask[i];
     }
 
-    const faceDist = extractSkinDistribution(rgba, oklab, mergeFaceMask, faceSamples, W, H);
+    const faceDist = extractSkinDistribution(rgba, mergeFaceMask, faceSamples, W, H);
     // Extract Body skin from visible body first; if outfit hides body skin below collar (few pixels) and no manual samples,
-    // use full original body+neck from imagem1 (origBodyFullMask) so neck skin is always captured!
-    let bodyDist = extractSkinDistribution(rgba, oklab, bodyRegionMask, bodySamples, W, H);
+    // use full original body+neck from imagem1 (origFaceMask1 === 0) so neck skin is always captured!
+    let bodyDist = extractSkinDistribution(rgba, bodyRegionMask, bodySamples, W, H);
     if ((!bodySamples || bodySamples.length === 0) && bodyDist.count < 120) {
-      const fallbackBody = extractSkinDistribution(origRgba, origOklab, origBodyFullMask, [], W, H);
+      const origBodyFullMask = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        origBodyFullMask[i] = origFaceMask1 ? (origFaceMask1[i] === 0 ? 1 : 0) : bodyRegionMask[i];
+      }
+      const fallbackBody = extractSkinDistribution(getOrigRgba(), origBodyFullMask, [], W, H);
       if (fallbackBody.count > bodyDist.count) {
         bodyDist = fallbackBody;
       }
@@ -920,58 +947,61 @@
         ? computeDeltaE2000(faceDist.meanRgb, bodyDist.meanRgb)
         : 0;
 
-    // Build selective skin weights for Face region and Body region
+    // Build compact Uint8Array selective skin weights reusing one feather scratch buffer
+    const scratchFeather = new Uint8Array(n);
     const faceSkinWeights = faceDist.valid
       ? buildSelectiveSkinMask(
           rgba,
-          oklab,
           mergeFaceMask,
           faceDist,
           options.maskSelectivity,
           options.protectFeatures,
           W,
-          H
+          H,
+          scratchFeather
         )
-      : new Float32Array(n);
+      : new Uint8Array(n);
 
     const bodySkinWeights = bodyDist.valid
       ? buildSelectiveSkinMask(
           rgba,
-          oklab,
           bodyRegionMask,
           bodyDist,
           options.maskSelectivity,
           options.protectFeatures,
           W,
-          H
+          H,
+          scratchFeather
         )
-      : new Float32Array(n);
+      : new Uint8Array(n);
 
-    // Render informative Skin Detection Heatmap Preview Canvas
-    const maskImgData = maskCtx.createImageData(W, H);
-    const mData = maskImgData.data;
-    for (let i = 0; i < n; i++) {
-      const p4 = i * 4;
-      const fw = faceSkinWeights[i];
-      const bw = bodySkinWeights[i];
-      // Dimmed grayscale base + Cyan highlight on Face Skin + Amber highlight on Body Reference Skin
-      const lum = Math.round((0.299 * rgba[p4] + 0.587 * rgba[p4 + 1] + 0.114 * rgba[p4 + 2]) * 0.35);
-      if (fw > 0.02) {
-        mData[p4] = Math.round(lum * (1 - fw) + 34 * fw);
-        mData[p4 + 1] = Math.round(lum * (1 - fw) + 211 * fw);
-        mData[p4 + 2] = Math.round(lum * (1 - fw) + 238 * fw);
-      } else if (bw > 0.02) {
-        mData[p4] = Math.round(lum * (1 - bw) + 245 * bw);
-        mData[p4 + 1] = Math.round(lum * (1 - bw) + 158 * bw);
-        mData[p4 + 2] = Math.round(lum * (1 - bw) + 11 * bw);
-      } else {
-        mData[p4] = lum;
-        mData[p4 + 1] = lum;
-        mData[p4 + 2] = lum;
+    // Render informative Skin Detection Heatmap ONLY when requested
+    if (maskCtx) {
+      const maskImgData = maskCtx.createImageData(W, H);
+      const mData = maskImgData.data;
+      const inv255 = 1 / 255;
+      for (let i = 0; i < n; i++) {
+        const p4 = i * 4;
+        const fw = faceSkinWeights[i] * inv255;
+        const bw = bodySkinWeights[i] * inv255;
+        const lum = Math.round((0.299 * rgba[p4] + 0.587 * rgba[p4 + 1] + 0.114 * rgba[p4 + 2]) * 0.35);
+        if (fw > 0.02) {
+          mData[p4] = Math.round(lum * (1 - fw) + 34 * fw);
+          mData[p4 + 1] = Math.round(lum * (1 - fw) + 211 * fw);
+          mData[p4 + 2] = Math.round(lum * (1 - fw) + 238 * fw);
+        } else if (bw > 0.02) {
+          mData[p4] = Math.round(lum * (1 - bw) + 245 * bw);
+          mData[p4 + 1] = Math.round(lum * (1 - bw) + 158 * bw);
+          mData[p4 + 2] = Math.round(lum * (1 - bw) + 11 * bw);
+        } else {
+          mData[p4] = lum;
+          mData[p4 + 1] = lum;
+          mData[p4 + 2] = lum;
+        }
+        mData[p4 + 3] = rgba[p4 + 3];
       }
-      mData[p4 + 3] = rgba[p4 + 3];
+      maskCtx.putImageData(maskImgData, 0, 0);
     }
-    maskCtx.putImageData(maskImgData, 0, 0);
 
     // Check if post-processing is bypassed or skin regions missing
     const hasFineTune =
@@ -1009,7 +1039,7 @@
      * Applies the chosen skin transfer from distSrc -> distTgt onto pixels with skinWeight > 0.
      * @param {ReturnType<typeof extractSkinDistribution>} distSrc
      * @param {ReturnType<typeof extractSkinDistribution>} distTgt
-     * @param {Float32Array} skinWeights
+     * @param {Uint8Array} skinWeights
      * @param {number} dirFactor 1.0 for full transfer, 0.5 for mutual midpoint
      * @param {boolean} applyManualGrade
      */
@@ -1021,7 +1051,6 @@
       const lumaMix = options.lumaMatch;
       const chromaMix = options.chromaMatch;
 
-      // Precompute method-specific structures once per region
       /** @type {number[] | null} */
       let mkMat = null;
       if (method === 'oklab_ot' || method === 'spatial_oklab') {
@@ -1032,9 +1061,9 @@
       let cdfLuts = null;
       if (method === 'cdf_curves') {
         cdfLuts = [
-          buildChannelQuantileLUT(distSrc.oklabBuf, distTgt.oklabBuf, 0, distSrc.indices, distTgt.indices, 0.15, 0.98),
-          buildChannelQuantileLUT(distSrc.oklabBuf, distTgt.oklabBuf, 1, distSrc.indices, distTgt.indices, -0.05, 0.18),
-          buildChannelQuantileLUT(distSrc.oklabBuf, distTgt.oklabBuf, 2, distSrc.indices, distTgt.indices, -0.05, 0.20),
+          buildChannelQuantileLUT(distSrc.rgbaBuf, distTgt.rgbaBuf, 0, distSrc.indices, distTgt.indices, 0.15, 0.98),
+          buildChannelQuantileLUT(distSrc.rgbaBuf, distTgt.rgbaBuf, 1, distSrc.indices, distTgt.indices, -0.05, 0.18),
+          buildChannelQuantileLUT(distSrc.rgbaBuf, distTgt.rgbaBuf, 2, distSrc.indices, distTgt.indices, -0.05, 0.20),
         ];
       }
 
@@ -1075,30 +1104,35 @@
       let zoneStats = null;
       if (method === 'zones_lgg') {
         zoneStats = {
-          srcZ: computeThreeZoneStats(distSrc.oklabBuf, distSrc.indices, distSrc.meanOk[0]),
-          tgtZ: computeThreeZoneStats(distTgt.oklabBuf, distTgt.indices, distTgt.meanOk[0]),
+          srcZ: computeThreeZoneStats(distSrc.rgbaBuf, distSrc.indices, distSrc.meanOk[0]),
+          tgtZ: computeThreeZoneStats(distTgt.rgbaBuf, distTgt.indices, distTgt.meanOk[0]),
         };
       }
 
       const [msL, msA, msB] = distSrc.meanOk;
       const [mtL, mtA, mtB] = distTgt.meanOk;
 
-      // Manual fine-tuning offsets converted to perceptual Oklab units
       const dLight = applyManualGrade ? options.lightOffset * 0.0025 : 0;
-      const dTint = applyManualGrade ? options.tintOffset * 0.0009 : 0; // Olive (-) <-> Rosy (+)
-      const dTemp = applyManualGrade ? options.tempOffset * 0.0011 : 0; // Cool (-) <-> Warm (+)
+      const dTint = applyManualGrade ? options.tintOffset * 0.0009 : 0;
+      const dTemp = applyManualGrade ? options.tempOffset * 0.0011 : 0;
       const satMul = applyManualGrade ? options.satScale : 1.0;
       const tmpOk = new Float32Array(3);
+      const origBuf =
+        method === 'spatial_oklab' && effStrength > 0.001 && edtToOutsideSq
+          ? getOrigRgba()
+          : null;
+      const inv255 = 1 / 255;
 
       for (let i = 0; i < n; i++) {
-        const wSkin = skinWeights[i];
-        if (wSkin <= 0.002) continue;
+        const wByte = skinWeights[i];
+        if (wByte === 0) continue;
+        const wSkin = wByte * inv255;
 
         const p4 = i * 4;
-        const i3 = i * 3;
-        const L0 = oklab[i3];
-        const A0 = oklab[i3 + 1];
-        const B0 = oklab[i3 + 2];
+        rgbToOklabInto(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], tmpOk, 0);
+        const L0 = tmpOk[0];
+        const A0 = tmpOk[1];
+        const B0 = tmpOk[2];
 
         let Lm = L0;
         let Am = A0;
@@ -1113,13 +1147,11 @@
             Am = mtA + mkMat[3] * dL + mkMat[4] * dA + mkMat[5] * dB;
             Bm = mtB + mkMat[6] * dL + mkMat[7] * dA + mkMat[8] * dB;
 
-            if (method === 'spatial_oklab' && edtToOutsideSq && mergeFaceMask[i] === 1) {
-              // Anchor local skin illumination near the neck/collar junction toward origImg1Canvas
+            if (origBuf && edtToOutsideSq && mergeFaceMask[i] === 1) {
               const distSeam = Math.sqrt(edtToOutsideSq[i]);
               const seamPull = 1 - smoothstep(0, Math.max(24, options.seamEqualizePx * 2.2), distSeam);
               if (seamPull > 0.01) {
-                rgbToOklabInto(origRgba[p4], origRgba[p4 + 1], origRgba[p4 + 2], tmpOk, 0);
-                // Only pull if orig pixel is also plausible skin/similar luminance
+                rgbToOklabInto(origBuf[p4], origBuf[p4 + 1], origBuf[p4 + 2], tmpOk, 0);
                 if (Math.abs(tmpOk[0] - Lm) < 0.16) {
                   Lm = Lm + (tmpOk[0] - Lm) * seamPull * 0.65;
                   Am = Am + (tmpOk[1] - Am) * seamPull * 0.75;
@@ -1161,7 +1193,6 @@
           }
         }
 
-        // Separate Luminance vs Chroma mix controls + Overall Strength
         const wL = Math.min(1.5, effStrength * lumaMix) * wSkin;
         const wC = Math.min(1.5, effStrength * chromaMix) * wSkin;
 
@@ -1169,7 +1200,6 @@
         let Af = A0 + (Am - A0) * wC;
         let Bf = B0 + (Bm - B0) * wC;
 
-        // Apply optional manual micro-grading weighted by wSkin
         if (applyManualGrade && hasFineTune) {
           Lf += dLight * wSkin;
           Af = Af * (1 + (satMul - 1) * wSkin) + dTint * wSkin;
@@ -1181,7 +1211,6 @@
         rgba[p4] = nr;
         rgba[p4 + 1] = ng;
         rgba[p4 + 2] = nb;
-        rgbToOklabInto(nr, ng, nb, oklab, i3);
       }
     };
 
@@ -1190,16 +1219,14 @@
     } else if (options.direction === 'body_to_face') {
       applyRegionTransfer(bodyDist, faceDist, bodySkinWeights, 1.0, true);
     } else {
-      // Mutual convergence: both move halfway toward each other!
       applyRegionTransfer(faceDist, bodyDist, faceSkinWeights, 0.5, true);
       applyRegionTransfer(bodyDist, faceDist, bodySkinWeights, 0.5, false);
     }
 
-    // Spatially-varying frequency-separated Oklab border skin harmonization
+    // Spatially-varying frequency-separated Oklab border skin harmonization (box-scoped!)
     if (hasBorderHarm && faceDist.valid && bodyDist.valid) {
       harmonizeBorderSkinOklab(
         rgba,
-        oklab,
         W,
         H,
         mergeFaceMask,
@@ -1254,22 +1281,20 @@
 
   /**
    * Ensures skin color & luminance are spatially consistent across both sides of the seam border
-   * using spatially-varying directional Oklab collar profiling, mutual boundary convergence,
+   * using spatially-varying directional Oklab collar profiling scoped to the tight padded seam box
    * and bilateral texture preservation (pores/micro-detail remain 100% intact).
    *
    * @param {Uint8ClampedArray} rgba
-   * @param {Float32Array} oklab
    * @param {number} W
    * @param {number} H
    * @param {Uint8Array} mergeFaceMask
    * @param {Float32Array | null} edtToOutsideSq
-   * @param {Float32Array} faceSkinWeights
-   * @param {Float32Array} bodySkinWeights
+   * @param {Uint8Array} faceSkinWeights
+   * @param {Uint8Array} bodySkinWeights
    * @param {SkinPostOptions} options
    */
   function harmonizeBorderSkinOklab(
     rgba,
-    oklab,
     W,
     H,
     mergeFaceMask,
@@ -1285,66 +1310,105 @@
     const radius = Math.max(4, Math.min(90, Math.round(options.seamEqualizePx || 36)));
     if (borderStrength <= 0.01 || radius <= 2) return;
 
-    const faceEdtSq = edtToOutsideSq || Geo.computeEDT2DSq(mergeFaceMask, 0, W, H);
-    const bodyEdtSq = Geo.computeEDT2DSq(mergeFaceMask, 1, W, H);
+    // Compute tight bounding box of mergeFaceMask === 1 padded by radius + 4 so EDT stays small
+    let minX = W, minY = H, maxX = -1, maxY = -1;
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        if (mergeFaceMask[row + x] === 1) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < minX || maxY < minY) return;
+
+    const pad = radius + 4;
+    const bx = Math.max(0, minX - pad);
+    const by = Math.max(0, minY - pad);
+    const bw = Math.min(W - bx, maxX - minX + 1 + pad * 2);
+    const bh = Math.min(H - by, maxY - minY + 1 + pad * 2);
+    if (bw <= 0 || bh <= 0) return;
+
+    const subMask = new Uint8Array(bw * bh);
+    for (let y = 0; y < bh; y++) {
+      const fullRow = (by + y) * W + bx;
+      const subRow = y * bw;
+      for (let x = 0; x < bw; x++) {
+        subMask[subRow + x] = mergeFaceMask[fullRow + x];
+      }
+    }
+
+    const subFaceEdtSq = edtToOutsideSq ? null : Geo.computeEDT2DSq(subMask, 0, bw, bh);
+    const subBodyEdtSq = Geo.computeEDT2DSq(subMask, 1, bw, bh);
+
     const collarW = Math.max(10, Math.min(28, Math.round(radius * 0.55)));
+    const collarWSq = collarW * collarW;
     const cellSize = Math.max(24, Math.round(collarW * 1.25));
-    const gw = Math.max(1, Math.ceil(W / cellSize));
-    const gh = Math.max(1, Math.ceil(H / cellSize));
+    const gw = Math.max(1, Math.ceil(bw / cellSize));
+    const gh = Math.max(1, Math.ceil(bh / cellSize));
     const numCells = gw * gh;
 
     const faceSum = new Float32Array(numCells * 3);
     const faceW = new Float32Array(numCells);
     const bodySum = new Float32Array(numCells * 3);
     const bodyW = new Float32Array(numCells);
+    const tmpOk = new Float32Array(3);
+    const inv255 = 1 / 255;
 
     let gFaceL = 0, gFaceA = 0, gFaceB = 0, gFaceWt = 0;
     let gBodyL = 0, gBodyA = 0, gBodyB = 0, gBodyWt = 0;
 
-    // 1. Sample skin collar pixels on both sides of the boundary into spatial grid cells
-    for (let y = 0; y < H; y++) {
+    // 1. Sample skin collar pixels on both sides of the boundary into sub-box spatial cells
+    for (let y = 0; y < bh; y++) {
+      const fy = by + y;
+      const fullRow = fy * W + bx;
+      const subRow = y * bw;
       const cy = Math.min(gh - 1, (y / cellSize) | 0);
-      const row = y * W;
       const cRow = cy * gw;
-      for (let x = 0; x < W; x++) {
-        const i = row + x;
-        const cx = Math.min(gw - 1, (x / cellSize) | 0);
-        const ci = cRow + cx;
-        const ci3 = ci * 3;
-        const i3 = i * 3;
 
-        if (mergeFaceMask[i] === 1) {
-          const w = faceSkinWeights[i];
-          if (w > 0.15) {
-            const d2 = faceEdtSq[i];
-            if (d2 > 0 && d2 <= collarW * collarW) {
-              const L = oklab[i3], a = oklab[i3 + 1], b = oklab[i3 + 2];
-              faceSum[ci3] += L * w;
-              faceSum[ci3 + 1] += a * w;
-              faceSum[ci3 + 2] += b * w;
-              faceW[ci] += w;
-              gFaceL += L * w;
-              gFaceA += a * w;
-              gFaceB += b * w;
-              gFaceWt += w;
-            }
-          }
+      for (let x = 0; x < bw; x++) {
+        const si = subRow + x;
+        const fi = fullRow + x;
+        const isFace = subMask[si] === 1;
+        const w = (isFace ? faceSkinWeights[fi] : bodySkinWeights[fi]) * inv255;
+        if (w <= 0.15) continue;
+
+        const d2 = isFace
+          ? edtToOutsideSq
+            ? edtToOutsideSq[fi]
+            : /** @type {Float32Array} */ (subFaceEdtSq)[si]
+          : subBodyEdtSq[si];
+        if (d2 <= 0 || d2 > collarWSq) continue;
+
+        const p4 = fi * 4;
+        rgbToOklabInto(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], tmpOk, 0);
+        const L = tmpOk[0], a = tmpOk[1], b = tmpOk[2];
+
+        const cx = Math.min(gw - 1, (x / cellSize) | 0);
+        const ci3 = (cRow + cx) * 3;
+        const ci = cRow + cx;
+
+        if (isFace) {
+          faceSum[ci3] += L * w;
+          faceSum[ci3 + 1] += a * w;
+          faceSum[ci3 + 2] += b * w;
+          faceW[ci] += w;
+          gFaceL += L * w;
+          gFaceA += a * w;
+          gFaceB += b * w;
+          gFaceWt += w;
         } else {
-          const w = bodySkinWeights[i];
-          if (w > 0.15) {
-            const d2 = bodyEdtSq[i];
-            if (d2 > 0 && d2 <= collarW * collarW) {
-              const L = oklab[i3], a = oklab[i3 + 1], b = oklab[i3 + 2];
-              bodySum[ci3] += L * w;
-              bodySum[ci3 + 1] += a * w;
-              bodySum[ci3 + 2] += b * w;
-              bodyW[ci] += w;
-              gBodyL += L * w;
-              gBodyA += a * w;
-              gBodyB += b * w;
-              gBodyWt += w;
-            }
-          }
+          bodySum[ci3] += L * w;
+          bodySum[ci3 + 1] += a * w;
+          bodySum[ci3 + 2] += b * w;
+          bodyW[ci] += w;
+          gBodyL += L * w;
+          gBodyA += a * w;
+          gBodyB += b * w;
+          gBodyWt += w;
         }
       }
     }
@@ -1412,9 +1476,9 @@
     }
     const faceShare = 1 - bodyShare;
 
-    const sampleGrid3 = (grid, x, y) => {
-      const gx = Math.max(0, Math.min(gw - 1, x / cellSize - 0.5));
-      const gy = Math.max(0, Math.min(gh - 1, y / cellSize - 0.5));
+    const sampleGrid3 = (grid, sx, sy) => {
+      const gx = Math.max(0, Math.min(gw - 1, sx / cellSize - 0.5));
+      const gy = Math.max(0, Math.min(gh - 1, sy / cellSize - 0.5));
       const x0 = Math.floor(gx);
       const y0 = Math.floor(gy);
       const x1 = Math.min(gw - 1, x0 + 1);
@@ -1439,16 +1503,22 @@
     const rSq = radius * radius;
     const twoSigmaSq = 2 * 0.018;
 
-    // 4. Apply frequency-separated bilateral Oklab offset within boundary band
-    for (let y = 0; y < H; y++) {
-      const row = y * W;
-      for (let x = 0; x < W; x++) {
-        const i = row + x;
-        const isFace = mergeFaceMask[i] === 1;
-        const wSkin = isFace ? faceSkinWeights[i] : bodySkinWeights[i];
+    // 4. Apply frequency-separated bilateral Oklab offset within boundary band inside sub-box
+    for (let y = 0; y < bh; y++) {
+      const fullRow = (by + y) * W + bx;
+      const subRow = y * bw;
+      for (let x = 0; x < bw; x++) {
+        const si = subRow + x;
+        const fi = fullRow + x;
+        const isFace = subMask[si] === 1;
+        const wSkin = (isFace ? faceSkinWeights[fi] : bodySkinWeights[fi]) * inv255;
         if (wSkin <= 0.02) continue;
 
-        const d2 = isFace ? faceEdtSq[i] : bodyEdtSq[i];
+        const d2 = isFace
+          ? edtToOutsideSq
+            ? edtToOutsideSq[fi]
+            : /** @type {Float32Array} */ (subFaceEdtSq)[si]
+          : subBodyEdtSq[si];
         if (d2 >= rSq) continue;
 
         const share = isFace ? faceShare : bodyShare;
@@ -1462,15 +1532,15 @@
         const [fL, fA, fB] = sampleGrid3(faceGrid, x, y);
         const [bL, bA, bB] = sampleGrid3(bodyGrid, x, y);
 
-        // Clamp local offset gently toward global delta to prevent outlier spikes
         const dL = (bL - fL) * 0.72 + gDeltaL * 0.28;
         const dA = (bA - fA) * 0.72 + gDeltaA * 0.28;
         const dB = (bB - fB) * 0.72 + gDeltaB * 0.28;
 
-        const i3 = i * 3;
-        const L0 = oklab[i3];
-        const A0 = oklab[i3 + 1];
-        const B0 = oklab[i3 + 2];
+        const p4 = fi * 4;
+        rgbToOklabInto(rgba[p4], rgba[p4 + 1], rgba[p4 + 2], tmpOk, 0);
+        const L0 = tmpOk[0];
+        const A0 = tmpOk[1];
+        const B0 = tmpOk[2];
 
         const refL = isFace ? fL : bL;
         const refA = isFace ? fA : bA;
@@ -1487,13 +1557,9 @@
         const Bf = B0 + dB * gain;
 
         const [nr, ng, nb] = oklabToRgbTuple(Lf, Af, Bf);
-        const p4 = i * 4;
         rgba[p4] = nr;
         rgba[p4 + 1] = ng;
         rgba[p4 + 2] = nb;
-        oklab[i3] = Lf;
-        oklab[i3 + 1] = Af;
-        oklab[i3 + 2] = Bf;
       }
     }
   }

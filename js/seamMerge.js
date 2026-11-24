@@ -384,97 +384,71 @@
   }
 
   /**
-   * Pull-Push boundary extrapolation: extends AI pixel colors smoothly outside subMergeMask
-   * so coarse pyramid levels never pull dark/unrelated colors across the seam.
+   * Single-channel Pull-Push boundary extrapolation: extends AI channel colors smoothly
+   * outside validMask so coarse pyramid levels never pull dark/unrelated colors across the seam,
+   * using 1/3 the peak RAM of simultaneous 3-channel extrapolation.
    *
-   * @param {Float32Array} rPlane
-   * @param {Float32Array} gPlane
-   * @param {Float32Array} bPlane
+   * @param {Float32Array} plane
    * @param {Uint8Array} validMask
    * @param {number} w
    * @param {number} h
    */
-  function extrapolatePlanesPullPush(rPlane, gPlane, bPlane, validMask, w, h) {
+  function extrapolateSinglePlanePullPush(plane, validMask, w, h) {
     const levels = 5;
-    const rPyr = [new Float32Array(w * h)];
-    const gPyr = [new Float32Array(w * h)];
-    const bPyr = [new Float32Array(w * h)];
+    const valPyr = [new Float32Array(w * h)];
     const wPyr = [new Float32Array(w * h)];
     const dims = [{ w, h }];
 
     for (let i = 0; i < w * h; i++) {
       if (validMask[i] === 1) {
-        rPyr[0][i] = rPlane[i];
-        gPyr[0][i] = gPlane[i];
-        bPyr[0][i] = bPlane[i];
+        valPyr[0][i] = plane[i];
         wPyr[0][i] = 1;
       }
     }
 
-    // Pull (downsample premultiplied)
     for (let lv = 0; lv < levels; lv++) {
       const cw = dims[lv].w;
       const ch = dims[lv].h;
       if (cw <= 2 || ch <= 2) break;
-      const nr = pyrDownPlane(rPyr[lv], cw, ch);
-      const ng = pyrDownPlane(gPyr[lv], cw, ch);
-      const nb = pyrDownPlane(bPyr[lv], cw, ch);
+      const nv = pyrDownPlane(valPyr[lv], cw, ch);
       const nw = pyrDownPlane(wPyr[lv], cw, ch);
-      rPyr.push(nr.data);
-      gPyr.push(ng.data);
-      bPyr.push(nb.data);
+      valPyr.push(nv.data);
       wPyr.push(nw.data);
-      dims.push({ w: nr.w, h: nr.h });
+      dims.push({ w: nv.w, h: nv.h });
     }
 
     const top = dims.length - 1;
-    for (let i = 0; i < rPyr[top].length; i++) {
+    for (let i = 0; i < valPyr[top].length; i++) {
       const wt = wPyr[top][i];
       if (wt > 1e-5) {
-        rPyr[top][i] /= wt;
-        gPyr[top][i] /= wt;
-        bPyr[top][i] /= wt;
+        valPyr[top][i] /= wt;
         wPyr[top][i] = 1;
       }
     }
 
-    // Push (upsample & fill unnormalized regions)
     for (let lv = top - 1; lv >= 0; lv--) {
       const tw = dims[lv].w;
       const th = dims[lv].h;
       const cw = dims[lv + 1].w;
       const ch = dims[lv + 1].h;
-      const upR = pyrUpPlane(rPyr[lv + 1], cw, ch, tw, th);
-      const upG = pyrUpPlane(gPyr[lv + 1], cw, ch, tw, th);
-      const upB = pyrUpPlane(bPyr[lv + 1], cw, ch, tw, th);
-
-      const curR = rPyr[lv];
-      const curG = gPyr[lv];
-      const curB = bPyr[lv];
+      const upV = pyrUpPlane(valPyr[lv + 1], cw, ch, tw, th);
+      const curV = valPyr[lv];
       const curW = wPyr[lv];
 
       for (let i = 0; i < tw * th; i++) {
         const wt = curW[i];
         if (wt >= 0.999) {
-          curR[i] /= wt;
-          curG[i] /= wt;
-          curB[i] /= wt;
+          curV[i] /= wt;
         } else if (wt > 1e-4) {
-          curR[i] = (curR[i] / wt) * wt + upR[i] * (1 - wt);
-          curG[i] = (curG[i] / wt) * wt + upG[i] * (1 - wt);
-          curB[i] = (curB[i] / wt) * wt + upB[i] * (1 - wt);
+          curV[i] = (curV[i] / wt) * wt + upV[i] * (1 - wt);
         } else {
-          curR[i] = upR[i];
-          curG[i] = upG[i];
-          curB[i] = upB[i];
+          curV[i] = upV[i];
         }
         curW[i] = 1;
       }
     }
 
-    rPlane.set(rPyr[0]);
-    gPlane.set(gPyr[0]);
-    bPlane.set(bPyr[0]);
+    plane.set(valPyr[0]);
   }
 
   /**
@@ -937,6 +911,11 @@
         );
         applyLabColorTransfer(aiLab, aiRgba, subMergeMask, stats, effectiveColorMatch);
       }
+
+      if (mode !== 'luma_chroma' && mode !== 'edge_aware') {
+        aiLab = null;
+        origLab = null;
+      }
     }
 
     /**
@@ -1023,24 +1002,10 @@
       }
     } else if (mode === 'multiband') {
       const rEff = Math.max(4, radiusPx);
-      const rA = new Float32Array(subLen);
-      const gA = new Float32Array(subLen);
-      const bA = new Float32Array(subLen);
-      const rB = new Float32Array(subLen);
-      const gB = new Float32Array(subLen);
-      const bB = new Float32Array(subLen);
       const w0 = new Float32Array(subLen);
 
       for (let i = 0; i < subLen; i++) {
-        const p4 = i * 4;
-        rB[i] = origRgba[p4];
-        gB[i] = origRgba[p4 + 1];
-        bB[i] = origRgba[p4 + 2];
         if (subMergeMask[i] === 1) {
-          rA[i] = aiRgba[p4];
-          gA[i] = aiRgba[p4 + 1];
-          bA[i] = aiRgba[p4 + 2];
-          // Center sharp detail seam around 0.45 * rEff while coarse levels spread over [0..rEff]
           const d = subDistOut[i];
           let w = smoothstep(rEff * 0.2, rEff * 0.85, d);
           if (options.protectCoreFace && subOrigFace && subOrigFace[i] === 1 && subDistCore) {
@@ -1051,10 +1016,7 @@
         }
       }
 
-      // Smoothly extrapolate AI colors outside subMergeMask so pyramid never bleeds dark edges
-      extrapolatePlanesPullPush(rA, gA, bA, subMergeMask, bw, bh);
-
-      // Build Gaussian pyramid of weight mask (4 to 5 octaves depending on radius & size)
+      // Build Gaussian pyramid of weight mask once (4 to 5 octaves)
       const maxLevels = rEff >= 28 ? 5 : 4;
       const wGauss = [w0];
       const dims = [{ w: bw, h: bh }];
@@ -1065,31 +1027,38 @@
         dims.push({ w: down.w, h: down.h });
       }
 
-      const outR = blendSingleChannelPyramid(rA, rB, wGauss, dims);
-      const outG = blendSingleChannelPyramid(gA, gB, wGauss, dims);
-      const outB = blendSingleChannelPyramid(bA, bB, wGauss, dims);
-
       const outerTaper = Math.max(3, Math.min(10, rEff * 0.25));
-      for (let i = 0; i < subLen; i++) {
-        if (subMergeMask[i] !== 1) continue;
-        const p4 = i * 4;
-        let mr = Math.max(0, Math.min(255, outR[i]));
-        let mg = Math.max(0, Math.min(255, outG[i]));
-        let mb = Math.max(0, Math.min(255, outB[i]));
 
-        // Guarantee exact C1 continuity with untouched corpoSemBordas right at d = 0
-        const d = subDistOut[i];
-        if (d < outerTaper) {
-          const env = smoothstep(0, outerTaper, d);
-          mr = mr * env + origRgba[p4] * (1 - env);
-          mg = mg * env + origRgba[p4 + 1] * (1 - env);
-          mb = mb * env + origRgba[p4 + 2] * (1 - env);
+      // Process R, G, B sequentially one plane at a time to cut mobile peak RAM by ~65%
+      for (let ch = 0; ch < 3; ch++) {
+        const planeA = new Float32Array(subLen);
+        const planeB = new Float32Array(subLen);
+
+        for (let i = 0; i < subLen; i++) {
+          const p4 = i * 4 + ch;
+          planeB[i] = origRgba[p4];
+          if (subMergeMask[i] === 1) {
+            planeA[i] = aiRgba[p4];
+          }
         }
 
-        outRgba[p4] = Math.round(mr);
-        outRgba[p4 + 1] = Math.round(mg);
-        outRgba[p4 + 2] = Math.round(mb);
-        outRgba[p4 + 3] = Math.max(aiRgba[p4 + 3], origRgba[p4 + 3]);
+        extrapolateSinglePlanePullPush(planeA, subMergeMask, bw, bh);
+        const outCh = blendSingleChannelPyramid(planeA, planeB, wGauss, dims);
+
+        for (let i = 0; i < subLen; i++) {
+          if (subMergeMask[i] !== 1) continue;
+          const p4 = i * 4;
+          let mVal = Math.max(0, Math.min(255, outCh[i]));
+          const d = subDistOut[i];
+          if (d < outerTaper) {
+            const env = smoothstep(0, outerTaper, d);
+            mVal = mVal * env + origRgba[p4 + ch] * (1 - env);
+          }
+          outRgba[p4 + ch] = Math.round(mVal);
+          if (ch === 0) {
+            outRgba[p4 + 3] = Math.max(aiRgba[p4 + 3], origRgba[p4 + 3]);
+          }
+        }
       }
     } else if (mode === 'poisson') {
       solveScreenedPoissonBox(

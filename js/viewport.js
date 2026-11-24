@@ -264,11 +264,15 @@
       this._syncCanvasSize();
     }
 
+    _getDpr() {
+      return Math.min(2, window.devicePixelRatio || 1);
+    }
+
     _syncCanvasSize() {
       const parent = this.canvas.parentElement;
       if (!parent) return false;
       const rect = parent.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = this._getDpr();
       const cssW = Math.max(100, Math.floor(rect.width));
       const cssH = Math.max(100, Math.floor(rect.height));
       const targetW = Math.floor(cssW * dpr);
@@ -282,7 +286,7 @@
     }
 
     getCssSize() {
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = this._getDpr();
       return {
         w: this.canvas.width / dpr,
         h: this.canvas.height / dpr,
@@ -1038,7 +1042,7 @@
     _draw() {
       const ctx = this.ctx;
       if (!ctx) return;
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = this._getDpr();
       const { w: vw, h: vh } = this.getCssSize();
 
       ctx.save();
