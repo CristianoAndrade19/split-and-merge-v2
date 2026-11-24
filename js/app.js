@@ -9,19 +9,55 @@
   const Seam = window.SplitMergeSeam;
   const SkinPost = window.SplitMergeSkinPost;
   const Prompts = window.SplitMergePrompts;
+  const Storage = window.SplitMergeStorage;
   const ViewportClass = window.SplitMergeViewport;
+
+  /**
+   * 7 Obsidian (Black + Accent) curated themes.
+   */
+  const THEMES = [
+    { id: 'obsidian-cyan', name: 'Preto + Ciano', sub: 'Neon Clássico', accent: '#22d3ee', accent2: '#10b981', themeColor: '#000000' },
+    { id: 'obsidian-emerald', name: 'Preto + Esmeralda', sub: 'Precisão Verde', accent: '#34d399', accent2: '#22d3ee', themeColor: '#000000' },
+    { id: 'obsidian-violet', name: 'Preto + Violeta', sub: 'Estúdio Púrpura', accent: '#a78bfa', accent2: '#ec4899', themeColor: '#000000' },
+    { id: 'obsidian-crimson', name: 'Preto + Carmesim', sub: 'Rubi Intenso', accent: '#fb7185', accent2: '#f59e0b', themeColor: '#000000' },
+    { id: 'obsidian-amber', name: 'Preto + Âmbar', sub: 'Ouro Quente', accent: '#fbbf24', accent2: '#fb923c', themeColor: '#000000' },
+    { id: 'obsidian-sunset', name: 'Preto + Magenta', sub: 'Coral Elétrico', accent: '#f472b6', accent2: '#fb923c', themeColor: '#000000' },
+    { id: 'obsidian-mono', name: 'Preto + Prata', sub: 'Minimalista Puro', accent: '#f4f4f5', accent2: '#a1a1aa', themeColor: '#000000' },
+  ];
+
+  /** @type {AppSettings} */
+  const DEFAULT_SETTINGS = {
+    theme: 'obsidian-cyan',
+    precisionDefaultMobile: true,
+    precisionSensitivity: 0.35,
+    loupeZoom: 3.0,
+    loupeSize: 132,
+    autoSaveHistory: true,
+  };
+
+  function generateProjectId() {
+    return `proj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  }
 
   // ===========================================================================
   // Application State
   // ===========================================================================
   const state = {
-    /** @type {1 | 'flux' | 2 | 3 | 4 | 5 | 6} */
-    activeStep: 1, // 1, 'flux', 2..6
+    /** @type {'studio' | 'history' | 'settings'} */
+    activeView: 'studio',
+    /** @type {'all' | 'in_progress' | 'completed'} */
+    historyFilter: 'all',
+    /** @type {1 | 2 | 3 | 4 | 5 | 6} */
+    activeStep: 1,
     showGuides: true,
-    targetDataFolder: '4', // Default subfolder in /data
+    targetDataFolder: '4',
     step6Subtab: 'engine', // 'engine' | 'fine' | 'samples'
-    /** @type {'collage' | 'config'} */
-    fluxSubtab: 'collage',
+    precisionCut: false,
+    /** @type {AppSettings} */
+    appSettings: { ...DEFAULT_SETTINGS },
+    currentProjectId: generateProjectId(),
+    currentProjectName: '',
+    currentProjectCreatedAt: Date.now(),
 
     // --- Step 1: imagem1 (Cortar e isolar corpo + definir Corpo vs Face fixo) ---
     /** @type {LoadedImage | null} */
@@ -30,11 +66,13 @@
     img1Canvas: null,
     /** @type {SelectionShape | null} */
     selection1: null,
+    /** @type {{ selection: SelectionShape, rawMask: Uint8Array | null, faceIsOne: boolean } | null} */
+    prevSelection1: null,
     /** @type {Uint8Array | null} */
     rawMask1: null,
-    faceIsOne1: true, // Fixed role choice shared between imagem1 and imagem2!
+    faceIsOne1: true,
     /** @type {Uint8Array | null} */
-    faceMask1: null, // 1 = Face, 0 = Corpo
+    faceMask1: null,
     /** @type {Float32Array | null} */
     edtFace1OutSq: null,
     /** @type {Float32Array | null} */
@@ -79,6 +117,8 @@
     expandPx: 36,
     /** @type {SelectionShape | null} */
     customSelection2: null,
+    /** @type {{ selection: SelectionShape, rawMask: Uint8Array | null, faceIsOne: boolean } | null} */
+    prevCustomSelection2: null,
     /** @type {Uint8Array | null} */
     customRawMask2: null,
     customFaceIsOne2: true,
@@ -88,7 +128,7 @@
     /** @type {Float32Array | null} */
     edtCustomInSq: null,
     /** @type {Uint8Array | null} */
-    mergeFaceMask: null, // 1 = (face + bordas imprecisas), 0 = (corpo sem bordas imprecisas)
+    mergeFaceMask: null,
     /** @type {Float32Array | null} */
     edtMergeInsideSq: null,
     /** @type {RectBox | null} */
@@ -153,7 +193,9 @@
       chromaMatch: 1.0,
       maskSelectivity: 0.72,
       protectFeatures: true,
-      seamEqualizePx: 14,
+      seamEqualizePx: 36,
+      borderMatchStrength: 0.9,
+      borderMutualMeet: true,
       tempOffset: 0,
       tintOffset: 0,
       lightOffset: 0,
@@ -173,66 +215,40 @@
     skinMaskPreviewCanvas: null,
     /** @type {SkinDiagnostics | null} */
     skinDiagnostics: null,
-
-    // --- Seção FLUX.1 Colagem Contextual (Rosto Dividido + até 6 Referências) ---
-    flux: {
-      /** @type {'face1' | 'img1'} */
-      leftSource: 'face1',
-      cropLeftToFace: true,
-      cropPadPx: 14,
-      autoSendToStep2: true,
-      /** @type {'collage' | 'left' | 'result' | 'compare'} */
-      view: 'collage',
-      /** @type {{ id: string, loaded: LoadedImage, dataUrl: string }[]} */
-      refs: [],
-      /** @type {'original_hair' | 'reference_hair' | 'custom'} */
-      promptTemplate: 'original_hair',
-      promptText: '',
-      promptDirty: false,
-      rawPrompts: {
-        original_hair: '',
-        reference_hair: '',
-      },
-      config: {
-        model_id: 'black-forest-labs/FLUX.1-dev',
-        use_8bit_quantization: true,
-        quantization_mode: '4bit',
-        device: 'cuda',
-        image_path: 'data/1/imagemMerge.png',
-        output_path: 'data/1/flux_refined.png',
-        /** @type {string | null} */
-        prompt_file: null,
-        prompt: '',
-        strength: 0.65,
-        /** @type {number | null} */
-        num_inference_steps: null,
-        /** @type {number | null} */
-        guidance_scale: null,
-        /** @type {number | null} */
-        seed: 42,
-        target_megapixels: 1.0,
-        output_size_mode: 'auto',
-        collage_gap_px: 4,
-        collage_bg_color: '#000000',
-      },
-      apiBase: '',
-      apiOnline: false,
-      /** @type {any} */
-      status: null,
-      isGenerating: false,
-      lastError: '',
-      lastSavedResultPath: '',
-      lastSavedCollagePath: '',
-    },
-    /** @type {HTMLCanvasElement | null} */
-    fluxLeftPanelCanvas: null,
-    /** @type {HTMLCanvasElement | null} */
-    fluxCollageCanvas: null,
-    /** @type {HTMLCanvasElement | null} */
-    fluxResultCanvas: null,
-    /** @type {LoadedImage | null} */
-    fluxResultLoaded: null,
   };
+
+  /** Lazy recomputation dirty flags — avoids cascading expensive steps during live drags */
+  const dirtySteps = {
+    2: false,
+    3: false,
+    4: false,
+    5: false,
+    6: false,
+    step3RebuildBase: true,
+  };
+
+  function markDirtyFrom(startStep, rebuildMergeBase = true) {
+    for (let s = startStep; s <= 6; s++) {
+      dirtySteps[s] = true;
+    }
+    if (startStep <= 3 && rebuildMergeBase) {
+      dirtySteps.step3RebuildBase = true;
+    }
+  }
+
+  /**
+   * Replaces a canvas property on state while freeing GPU/backing memory of the replaced canvas.
+   * @param {keyof typeof state} key
+   * @param {HTMLCanvasElement | null} nextCanvas
+   */
+  function setStateCanvas(key, nextCanvas) {
+    const prev = /** @type {HTMLCanvasElement | null} */ (state[key]);
+    if (prev && prev !== nextCanvas && prev !== state.img1Canvas && prev !== state.imgFinalUnblendedCanvas) {
+      Ops.releaseCanvas(prev);
+    }
+    // @ts-ignore - controlled canvas state keys
+    state[key] = nextCanvas;
+  }
 
   // ===========================================================================
   // DOM References & Viewport Initialization
@@ -257,8 +273,27 @@
   const fileInputAutoPair = /** @type {HTMLInputElement} */ (document.getElementById('fileInputAutoPair'));
   const fileInputAutoImg1 = /** @type {HTMLInputElement} */ (document.getElementById('fileInputAutoImg1'));
   const fileInputAutoFace = /** @type {HTMLInputElement} */ (document.getElementById('fileInputAutoFace'));
-  const fileInputFluxRefs = /** @type {HTMLInputElement} */ (document.getElementById('fileInputFluxRefs'));
+  const workspaceStudio = /** @type {HTMLElement | null} */ (document.getElementById('workspaceStudio'));
+  const viewHistory = /** @type {HTMLElement | null} */ (document.getElementById('viewHistory'));
+  const viewSettings = /** @type {HTMLElement | null} */ (document.getElementById('viewSettings'));
+  const btnViewStudio = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnViewStudio'));
+  const btnViewHistory = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnViewHistory'));
+  const btnViewSettings = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnViewSettings'));
+  const metaThemeColor = /** @type {HTMLMetaElement | null} */ (document.getElementById('metaThemeColor'));
   const modalAutoSelect = /** @type {HTMLElement} */ (document.getElementById('modalAutoSelect'));
+
+  // Prevent iOS Safari / Mobile browsers from initiating text/element selection during touch-hold or pinch
+  document.addEventListener('selectstart', (e) => {
+    const t = e.target;
+    if (
+      t instanceof HTMLInputElement ||
+      t instanceof HTMLTextAreaElement ||
+      (t instanceof HTMLElement && t.isContentEditable)
+    ) {
+      return;
+    }
+    e.preventDefault();
+  });
   const toastContainer = /** @type {HTMLElement} */ (document.getElementById('toastContainer'));
   const sidebarPanel = /** @type {HTMLElement | null} */ (document.getElementById('sidebarPanel'));
   const sheetHandleBar = /** @type {HTMLElement | null} */ (document.getElementById('sheetHandleBar'));
@@ -403,18 +438,6 @@
   function handleEmptyCanvasClick() {
     if (state.activeStep === 1) {
       fileInputImg1.click();
-    } else if (state.activeStep === 'flux') {
-      if (!state.img1Canvas) {
-        state.activeStep = 1;
-        syncAllUI();
-        fileInputImg1.click();
-      } else if (!state.face1Canvas) {
-        state.activeStep = 1;
-        syncAllUI();
-        showToast('Desenhe o corte ao redor do rosto na Etapa 1.');
-      } else {
-        fileInputFluxRefs?.click();
-      }
     } else if (state.activeStep === 2) {
       fileInputImg2.click();
     } else if (state.activeStep === 4) {
@@ -479,6 +502,13 @@
     onRegionClick: handleViewportRegionClick,
     onTransformChange: handleViewportTransformChange,
     onEmptyClick: handleEmptyCanvasClick,
+    onStrokeStateChange: () => {
+      if (state.activeStep === 1 || state.activeStep === 3) {
+        renderStageToolbar();
+        const sbUndo = /** @type {HTMLButtonElement | null} */ (document.getElementById('btnSbUndo1'));
+        if (sbUndo) sbUndo.disabled = !viewport.hasActiveStroke() && !state.prevSelection1;
+      }
+    },
     onZoomChange: (z) => {
       zoomReadout.textContent = `${Math.round(z * 100)}%`;
     },
@@ -503,21 +533,58 @@
   }
 
   // ===========================================================================
-  // Reactive Pipeline Recomputation
+  // Lazy Pipeline Recomputation (Zero Lag Under Continuous Editing)
   // ===========================================================================
 
   /**
+   * Ensures all dirty prerequisite steps up to `targetStep` are freshly computed.
+   * @param {number} targetStep
+   */
+  function ensureStepComputed(targetStep) {
+    if (targetStep >= 2 && dirtySteps[2]) {
+      recomputeStep2Outputs();
+    }
+    if (targetStep >= 3 && dirtySteps[3]) {
+      recomputeStep3Outputs(dirtySteps.step3RebuildBase);
+    }
+    if (targetStep >= 4 && dirtySteps[4]) {
+      recomputeStep4Outputs();
+    }
+    if (targetStep >= 5 && dirtySteps[5]) {
+      recomputeStep5Outputs();
+    }
+    if (targetStep >= 6 && dirtySteps[6]) {
+      recomputeStep6Outputs();
+    }
+  }
+
+  let _liveRafId = 0;
+  /** @type {(() => void) | null} */
+  let _pendingLiveFn = null;
+  function scheduleLiveRecompute(fn) {
+    _pendingLiveFn = fn;
+    if (_liveRafId) return;
+    _liveRafId = requestAnimationFrame(() => {
+      _liveRafId = 0;
+      const run = _pendingLiveFn;
+      _pendingLiveFn = null;
+      if (run) run();
+    });
+  }
+
+  /**
    * Recomputes faceMask1, EDT fields, and isolated pieces of imagem1.
+   * Marks downstream Steps 2..6 dirty for lazy computation instead of blocking current frame.
    */
   function recomputeStep1Outputs(recomputeEDT = true) {
     if (!state.img1Canvas || !state.rawMask1) {
       state.faceMask1 = null;
       state.edtFace1OutSq = null;
       state.edtFace1InSq = null;
-      state.corpo1Canvas = null;
-      state.face1Canvas = null;
-      state.mask1OverlayCanvas = null;
-      recomputeStep2Outputs();
+      setStateCanvas('corpo1Canvas', null);
+      setStateCanvas('face1Canvas', null);
+      setStateCanvas('mask1OverlayCanvas', null);
+      markDirtyFrom(2, true);
       return;
     }
 
@@ -536,31 +603,34 @@
       state.edtFace1InSq = Geo.computeEDT2DSq(faceMask, 0, W, H);
     }
 
-    state.face1Canvas = Ops.isolateByMask(state.img1Canvas, faceMask, 1);
-    state.corpo1Canvas = Ops.isolateByMask(state.img1Canvas, faceMask, 0);
-    state.mask1OverlayCanvas = Ops.createMaskOverlayCanvas(faceMask, W, H, {
-      tintOne: [56, 189, 248, 46],
-      tintZero: [245, 158, 11, 28],
-      borderColor: [56, 189, 248, 250],
-      borderThickness: 2,
-    });
+    setStateCanvas('face1Canvas', Ops.isolateByMask(state.img1Canvas, faceMask, 1));
+    setStateCanvas('corpo1Canvas', Ops.isolateByMask(state.img1Canvas, faceMask, 0));
+    setStateCanvas(
+      'mask1OverlayCanvas',
+      Ops.createMaskOverlayCanvas(faceMask, W, H, {
+        tintOne: [56, 189, 248, 46],
+        tintZero: [245, 158, 11, 28],
+        borderColor: [56, 189, 248, 250],
+        borderThickness: 2,
+      })
+    );
 
     state.faceCentroid1 = Geo.computeMaskCentroid(faceMask, 1, W, H);
     state.bodyCentroid1 = Geo.computeMaskCentroid(faceMask, 0, W, H);
 
-    recomputeFluxCollage();
-    recomputeStep2Outputs();
+    markDirtyFrom(2, true);
   }
 
   /**
    * Recomputes normalized/padded imagem2 and its isolated Face using the SAME selection & role from imagem1.
    */
   function recomputeStep2Outputs() {
+    dirtySteps[2] = false;
     if (!state.img1Canvas || !state.img2) {
-      state.img2AlignedCanvas = null;
+      setStateCanvas('img2AlignedCanvas', null);
       state.img2Placement = null;
-      state.face2Canvas = null;
-      recomputeStep3Outputs(true);
+      setStateCanvas('face2Canvas', null);
+      markDirtyFrom(3, true);
       return;
     }
 
@@ -575,16 +645,16 @@
       H,
       state.img2Transform
     );
-    state.img2AlignedCanvas = canvas;
+    setStateCanvas('img2AlignedCanvas', canvas);
     state.img2Placement = placement;
 
     if (state.faceMask1) {
-      state.face2Canvas = Ops.isolateByMask(canvas, state.faceMask1, 1);
+      setStateCanvas('face2Canvas', Ops.isolateByMask(canvas, state.faceMask1, 1));
     } else {
-      state.face2Canvas = null;
+      setStateCanvas('face2Canvas', null);
     }
 
-    recomputeStep3Outputs(true);
+    markDirtyFrom(3, true);
   }
 
   /**
@@ -595,15 +665,17 @@
    * @param {boolean} [rebuildMergeBase=true]
    */
   function recomputeStep3Outputs(rebuildMergeBase = true) {
+    dirtySteps[3] = false;
+    dirtySteps.step3RebuildBase = false;
     if (!state.img1Canvas || !state.corpo1Canvas || !state.face2Canvas || !state.faceMask1) {
-      state.imgMergeCanvas = null;
+      setStateCanvas('imgMergeCanvas', null);
       state.mergeFaceMask = null;
       state.edtMergeInsideSq = null;
       state.mergeFaceBox = null;
-      state.faceImprecisaCanvas = null;
-      state.corpoSemBordasCanvas = null;
-      state.mergeOverlayCanvas = null;
-      recomputeStep4Outputs();
+      setStateCanvas('faceImprecisaCanvas', null);
+      setStateCanvas('corpoSemBordasCanvas', null);
+      setStateCanvas('mergeOverlayCanvas', null);
+      markDirtyFrom(4);
       return;
     }
 
@@ -611,10 +683,9 @@
     const H = state.img1Canvas.height;
 
     if (rebuildMergeBase || !state.imgMergeCanvas) {
-      state.imgMergeCanvas = Ops.uniteByComplementaryMask(
-        state.face2Canvas,
-        state.corpo1Canvas,
-        state.faceMask1
+      setStateCanvas(
+        'imgMergeCanvas',
+        Ops.uniteByComplementaryMask(state.face2Canvas, state.corpo1Canvas, state.faceMask1)
       );
     }
 
@@ -649,7 +720,6 @@
           mMask = baseCustom;
         }
       } else if (state.edtFace1OutSq) {
-        // Fallback before custom stroke is drawn: show unexpanded faceMask1
         mMask = new Uint8Array(state.faceMask1);
       }
     }
@@ -657,44 +727,46 @@
     state.mergeFaceMask = mMask;
 
     if (!mMask) {
-      state.faceImprecisaCanvas = null;
-      state.corpoSemBordasCanvas = null;
-      state.mergeOverlayCanvas = null;
+      setStateCanvas('faceImprecisaCanvas', null);
+      setStateCanvas('corpoSemBordasCanvas', null);
+      setStateCanvas('mergeOverlayCanvas', null);
       state.mergeFaceBox = null;
       state.edtMergeInsideSq = null;
-      recomputeStep4Outputs();
+      markDirtyFrom(4);
       return;
     }
 
     state.mergeFaceBox = Geo.computeMaskBoundingBox(mMask, W, H, 0);
-    state.faceImprecisaCanvas = Ops.isolateByMask(state.imgMergeCanvas, mMask, 1);
-    state.corpoSemBordasCanvas = Ops.isolateByMask(state.imgMergeCanvas, mMask, 0);
+    setStateCanvas('faceImprecisaCanvas', Ops.isolateByMask(state.imgMergeCanvas, mMask, 1));
+    setStateCanvas('corpoSemBordasCanvas', Ops.isolateByMask(state.imgMergeCanvas, mMask, 0));
 
-    state.mergeOverlayCanvas = Ops.createMaskOverlayCanvas(mMask, W, H, {
-      tintOne: [167, 139, 250, 46],   // Violet tint for Face + Imprecise Borders
-      tintZero: [16, 185, 129, 24],   // Emerald tint for Clean Body
-      borderColor: [167, 139, 250, 250],
-      borderThickness: 2,
-    });
+    setStateCanvas(
+      'mergeOverlayCanvas',
+      Ops.createMaskOverlayCanvas(mMask, W, H, {
+        tintOne: [167, 139, 250, 46],
+        tintZero: [16, 185, 129, 24],
+        borderColor: [167, 139, 250, 250],
+        borderThickness: 2,
+      })
+    );
 
     state.mergeFaceCentroid = Geo.computeMaskCentroid(mMask, 1, W, H);
     state.mergeBodyCentroid = Geo.computeMaskCentroid(mMask, 0, W, H);
-
-    // Invalidate cached inside-EDT so Step 5 & Step 6 recompute it cleanly on demand
     state.edtMergeInsideSq = null;
 
-    recomputeStep4Outputs();
+    markDirtyFrom(4);
   }
 
   /**
    * Recomputes aligned AI-refined face image and isolates (face + bordas precisas).
    */
   function recomputeStep4Outputs() {
+    dirtySteps[4] = false;
     if (!state.img1Canvas || !state.mergeFaceMask || !state.imgRefined) {
-      state.refinedAlignedCanvas = null;
+      setStateCanvas('refinedAlignedCanvas', null);
       state.refinedPlacement = null;
-      state.facePrecisaCanvas = null;
-      recomputeStep5Outputs();
+      setStateCanvas('facePrecisaCanvas', null);
+      markDirtyFrom(5);
       return;
     }
 
@@ -712,11 +784,11 @@
       H,
       state.refinedTransform
     );
-    state.refinedAlignedCanvas = canvas;
+    setStateCanvas('refinedAlignedCanvas', canvas);
     state.refinedPlacement = placement;
-    state.facePrecisaCanvas = Ops.isolateByMask(canvas, state.mergeFaceMask, 1);
+    setStateCanvas('facePrecisaCanvas', Ops.isolateByMask(canvas, state.mergeFaceMask, 1));
 
-    recomputeStep5Outputs();
+    markDirtyFrom(5);
   }
 
   /**
@@ -724,30 +796,32 @@
    * with the selected seam & skin-tone merge technique.
    */
   function recomputeStep5Outputs() {
+    dirtySteps[5] = false;
     if (
       !state.facePrecisaCanvas ||
       !state.corpoSemBordasCanvas ||
       !state.mergeFaceMask ||
       !state.img1Canvas
     ) {
-      state.imgFinalUnblendedCanvas = null;
-      state.imgFinalCanvas = null;
-      recomputeStep6Outputs();
+      setStateCanvas('imgFinalUnblendedCanvas', null);
+      setStateCanvas('imgFinalCanvas', null);
+      markDirtyFrom(6);
       return;
     }
 
-    state.imgFinalUnblendedCanvas = Ops.uniteByComplementaryMask(
+    const unblended = Ops.uniteByComplementaryMask(
       state.facePrecisaCanvas,
       state.corpoSemBordasCanvas,
       state.mergeFaceMask
     );
+    setStateCanvas('imgFinalUnblendedCanvas', unblended);
 
     const fm = state.finalMerge;
     const needsAdvanced = fm.mode !== 'none' || fm.colorMatchStrength > 0.001;
 
     if (!needsAdvanced) {
-      state.imgFinalCanvas = state.imgFinalUnblendedCanvas;
-      recomputeStep6Outputs();
+      setStateCanvas('imgFinalCanvas', unblended);
+      markDirtyFrom(6);
       return;
     }
 
@@ -760,28 +834,32 @@
       );
     }
 
-    state.imgFinalCanvas = Seam.mergeFinalAdvanced({
-      facePreciseCanvas: state.facePrecisaCanvas,
-      corpoSemBordasCanvas: state.corpoSemBordasCanvas,
-      origFullCanvas: state.img1Canvas,
-      mergeFaceMask: state.mergeFaceMask,
-      origFaceMask1: state.faceMask1,
-      edtToOutsideSq: state.edtMergeInsideSq,
-      edtInsideOrigFaceSq: state.edtFace1InSq,
-      mergeBox: state.mergeFaceBox,
-      options: fm,
-    });
+    setStateCanvas(
+      'imgFinalCanvas',
+      Seam.mergeFinalAdvanced({
+        facePreciseCanvas: state.facePrecisaCanvas,
+        corpoSemBordasCanvas: state.corpoSemBordasCanvas,
+        origFullCanvas: state.img1Canvas,
+        mergeFaceMask: state.mergeFaceMask,
+        origFaceMask1: state.faceMask1,
+        edtToOutsideSq: state.edtMergeInsideSq,
+        edtInsideOrigFaceSq: state.edtFace1InSq,
+        mergeBox: state.mergeFaceBox,
+        options: fm,
+      })
+    );
 
-    recomputeStep6Outputs();
+    markDirtyFrom(6);
   }
 
   /**
    * Recomputes Stage 6 Post-Processing Skin Color Matching after imagemFinal.
    */
   function recomputeStep6Outputs() {
+    dirtySteps[6] = false;
     if (!state.imgFinalCanvas || !state.img1Canvas || !state.mergeFaceMask) {
-      state.imgPostCanvas = null;
-      state.skinMaskPreviewCanvas = null;
+      setStateCanvas('imgPostCanvas', null);
+      setStateCanvas('skinMaskPreviewCanvas', null);
       state.skinDiagnostics = null;
       return;
     }
@@ -806,9 +884,48 @@
       options: state.skinPost,
     });
 
-    state.imgPostCanvas = res.canvas;
-    state.skinMaskPreviewCanvas = res.maskPreviewCanvas;
+    setStateCanvas('imgPostCanvas', res.canvas);
+    setStateCanvas('skinMaskPreviewCanvas', res.maskPreviewCanvas);
     state.skinDiagnostics = res.diagnostics;
+  }
+
+  /**
+   * Releases inactive intermediate GPU canvases to keep continuous sessions light on RAM/VRAM.
+   */
+  function freeInactiveMemory() {
+    const s = state.activeStep;
+    let released = 0;
+    const drop = (key, stepNum) => {
+      if (state[key] && s !== stepNum) {
+        setStateCanvas(key, null);
+        dirtySteps[stepNum] = true;
+        released++;
+      }
+    };
+    if (s !== 2) {
+      drop('img2AlignedCanvas', 2);
+      drop('face2Canvas', 2);
+    }
+    if (s !== 3 && s !== 4) {
+      drop('imgMergeCanvas', 3);
+      drop('faceImprecisaCanvas', 3);
+      drop('corpoSemBordasCanvas', 3);
+      drop('mergeOverlayCanvas', 3);
+      dirtySteps.step3RebuildBase = true;
+    }
+    if (s !== 4 && s !== 5) {
+      drop('refinedAlignedCanvas', 4);
+      drop('facePrecisaCanvas', 4);
+    }
+    if (s !== 5 && s !== 6) {
+      drop('imgFinalUnblendedCanvas', 5);
+      drop('imgFinalCanvas', 5);
+    }
+    if (s !== 6) {
+      drop('imgPostCanvas', 6);
+      drop('skinMaskPreviewCanvas', 6);
+    }
+    return released;
   }
 
   /**
@@ -847,26 +964,38 @@
     const H = state.img1Canvas.height;
 
     if (state.activeStep === 1) {
+      if (state.selection1) {
+        state.prevSelection1 = {
+          selection: state.selection1,
+          rawMask: state.rawMask1,
+          faceIsOne: state.faceIsOne1,
+        };
+      }
       state.selection1 = sel;
       state.rawMask1 = Geo.rasterizePolygonMask(sel.polygon, W, H);
-      // If first time cutting, pick smart default for Face vs Corpo;
-      // user can invert anytime and it stays fixed across imagem1 & imagem2!
       state.faceIsOne1 = Geo.guessFaceIsOne(state.rawMask1, W, H);
       state.step1View = 'split';
       recomputeStep1Outputs(true);
       syncAllUI();
+      scheduleAutoSaveProject();
       showToast(
         sel.type === 'border-cut'
           ? 'Corte de 2 bordas concluído! Verifique Corpo e Face.'
           : 'Laço fechado concluído! Verifique Corpo e Face.'
       );
     } else if (state.activeStep === 3 && state.mergeRegionMode === 'custom') {
+      if (state.customSelection2) {
+        state.prevCustomSelection2 = {
+          selection: state.customSelection2,
+          rawMask: state.customRawMask2,
+          faceIsOne: state.customFaceIsOne2,
+        };
+      }
       state.customSelection2 = sel;
       state.customRawMask2 = Geo.rasterizePolygonMask(sel.polygon, W, H);
       state.customFaceIsOne2 = state.faceMask1
         ? Geo.matchMaskSideToReference(state.customRawMask2, state.faceMask1)
         : Geo.guessFaceIsOne(state.customRawMask2, W, H);
-      // Precompute EDT on normalized custom mask in case user tweaks extra expansion
       const normCustom = new Uint8Array(W * H);
       const want = state.customFaceIsOne2 ? 1 : 0;
       for (let i = 0; i < normCustom.length; i++) {
@@ -878,7 +1007,38 @@
       state.step3View = 'split';
       recomputeStep3Outputs(false);
       syncAllUI();
+      scheduleAutoSaveProject();
       showToast('Nova seleção de (face + bordas imprecisas) aplicada!');
+    }
+  }
+
+  function undoCutAction() {
+    if (viewport.undoStrokeSegment()) {
+      renderStageToolbar();
+      return;
+    }
+    if (state.activeStep === 1 && state.prevSelection1) {
+      const snap = state.prevSelection1;
+      state.prevSelection1 = null;
+      state.selection1 = snap.selection;
+      state.rawMask1 = snap.rawMask;
+      state.faceIsOne1 = snap.faceIsOne;
+      recomputeStep1Outputs(true);
+      syncAllUI();
+      scheduleAutoSaveProject();
+      showToast('Seleção anterior restaurada.');
+    } else if (state.activeStep === 3 && state.prevCustomSelection2) {
+      const snap = state.prevCustomSelection2;
+      state.prevCustomSelection2 = null;
+      state.customSelection2 = snap.selection;
+      state.customRawMask2 = snap.rawMask;
+      state.customFaceIsOne2 = snap.faceIsOne;
+      recomputeStep3Outputs(false);
+      syncAllUI();
+      scheduleAutoSaveProject();
+      showToast('Corte anterior restaurado.');
+    } else {
+      showToast('Nada para desfazer no momento.');
     }
   }
 
@@ -895,16 +1055,32 @@
         scale,
         rotation: rot,
       };
-      recomputeStep2Outputs();
-      syncViewportScene();
       updateSidebarLiveValues();
-      if (!isDragging) updateSidebarThumbnails();
+      const apply2 = () => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+        if (!isDragging) updateSidebarThumbnails();
+      };
+      if (isDragging) {
+        scheduleLiveRecompute(apply2);
+      } else {
+        apply2();
+        scheduleAutoSaveProject();
+      }
     } else if (state.activeStep === 4 && state.imgRefined) {
       state.refinedTransform = { x: Math.round(tx * 10) / 10, y: Math.round(ty * 10) / 10, scale };
-      recomputeStep4Outputs();
-      syncViewportScene();
       updateSidebarLiveValues();
-      if (!isDragging) updateSidebarThumbnails();
+      const apply4 = () => {
+        recomputeStep4Outputs();
+        syncViewportScene();
+        if (!isDragging) updateSidebarThumbnails();
+      };
+      if (isDragging) {
+        scheduleLiveRecompute(apply4);
+      } else {
+        apply4();
+        scheduleAutoSaveProject();
+      }
     }
   }
 
@@ -913,6 +1089,7 @@
     state.faceIsOne1 = !state.faceIsOne1;
     recomputeStep1Outputs(true);
     syncAllUI();
+    scheduleAutoSaveProject();
     showToast('Papéis Corpo ↔ Face invertidos (mantido fixo na imagem1 e imagem2).');
   }
 
@@ -930,11 +1107,9 @@
     state.edtCustomInSq = Geo.computeEDT2DSq(normCustom, 0, W, H);
     recomputeStep3Outputs(false);
     syncAllUI();
+    scheduleAutoSaveProject();
   }
 
-  // ===========================================================================
-  // FLUX.1 Colagem Contextual Helpers & API Bridge
-  // ===========================================================================
   function escapeHtml(str) {
     return String(str ?? '')
       .replace(/&/g, '&amp;')
@@ -943,273 +1118,36 @@
       .replace(/"/g, '&quot;');
   }
 
-  function loadedImageToPngDataUrl(loaded) {
-    const c = Ops.sourceToCanvas(loaded.img);
-    return c.toDataURL('image/png');
-  }
-
-  function getBasePromptTemplateText(template) {
-    if (template === 'reference_hair') {
-      return state.flux.rawPrompts.reference_hair || (Prompts && Prompts.referenceHair) || '';
-    }
-    return state.flux.rawPrompts.original_hair || (Prompts && Prompts.originalHair) || '';
-  }
-
-  function refreshFluxAdaptedPrompt(force = false) {
-    if (state.flux.promptTemplate === 'custom') return;
-    if (state.flux.promptDirty && !force) return;
-    const base = getBasePromptTemplateText(state.flux.promptTemplate);
-    const isRefHair = state.flux.promptTemplate === 'reference_hair';
-    state.flux.promptText =
-      Prompts && typeof Prompts.adaptForCollage === 'function'
-        ? Prompts.adaptForCollage(base, state.flux.refs.length, isRefHair)
-        : base;
-    state.flux.promptDirty = false;
-  }
-
-  function recomputeFluxCollage() {
-    if (!state.img1Canvas) {
-      state.fluxLeftPanelCanvas = null;
-      state.fluxCollageCanvas = null;
-      return;
-    }
-
-    const useFace = state.flux.leftSource === 'face1' && !!state.face1Canvas;
-    const rawSource = useFace && state.face1Canvas ? state.face1Canvas : state.img1Canvas;
-    const bgColor = state.flux.config.collage_bg_color || '#000000';
-    const gapPx = Number(state.flux.config.collage_gap_px ?? 4);
-
-    let cropBox = null;
-    if (useFace && state.flux.cropLeftToFace && state.face1Canvas) {
-      cropBox = Ops.extractBoundingBoxOfAlpha(state.face1Canvas, state.flux.cropPadPx);
-    }
-
-    const leftPanel = Ops.flattenCanvasWithBg(rawSource, bgColor, cropBox);
-    state.fluxLeftPanelCanvas = leftPanel;
-    state.fluxCollageCanvas = Ops.composeSideBySideCollageCanvas(
-      leftPanel,
-      state.flux.refs.map((r) => r.loaded.img),
-      { gapPx, bgColor }
-    );
-
-    refreshFluxAdaptedPrompt(false);
-  }
-
-  /**
-   * @param {LoadedImage[]} loadedList
-   */
-  function addFluxReferenceImages(loadedList) {
-    if (!loadedList || loadedList.length === 0) return;
-    const remaining = Math.max(0, 6 - state.flux.refs.length);
-    if (remaining <= 0) {
-      showToast('Limite máximo de 6 imagens de referência atingido.', true);
-      return;
-    }
-    const toAdd = loadedList.slice(0, remaining);
-    toAdd.forEach((loaded, idx) => {
-      state.flux.refs.push({
-        id: `ref_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
-        loaded,
-        dataUrl: loadedImageToPngDataUrl(loaded),
-      });
-    });
-
-    recomputeFluxCollage();
-    if (state.activeStep === 'flux') {
-      syncAllUI();
-    }
-    if (loadedList.length > remaining) {
-      showToast(`${toAdd.length} referência(s) adicionada(s) — limite máximo é 6.`, true);
-    } else {
-      showToast(`${toAdd.length} referência(s) adicionada(s) à colagem (${state.flux.refs.length}/6).`);
-    }
-  }
-
-  /**
-   * Calls same-origin /api/flux/* first, falling back to companion Python API on :8766.
-   * @param {string} endpoint
-   * @param {RequestInit} [options]
-   */
-  async function fluxApiFetch(endpoint, options = {}) {
-    const lanHost = window.location.hostname || '127.0.0.1';
-    const lanProto = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    const candidates = state.flux.apiBase
-      ? [state.flux.apiBase]
-      : ['', `${lanProto}//${lanHost}:8766`];
-
-    let lastErr = null;
-    for (const base of candidates) {
-      try {
-        const res = await fetch(`${base}${endpoint}`, options);
-        if (res.status === 404 || res.status === 501) {
-          continue;
-        }
-        const data = await res.json();
-        state.flux.apiBase = base;
-        state.flux.apiOnline = true;
-        return { ok: res.ok && data.ok !== false, status: res.status, data };
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-    state.flux.apiOnline = false;
-    throw lastErr || new Error('API FLUX.1 local offline (execute flux_server.py ou abrir_app.bat).');
-  }
-
-  async function refreshFluxBackendState(syncConfigFromDisk = false) {
-    try {
-      const stRes = await fluxApiFetch('/api/flux/status');
-      state.flux.status = stRes.data;
-
-      if (syncConfigFromDisk) {
-        const cfgRes = await fluxApiFetch('/api/flux/config');
-        if (cfgRes.ok && cfgRes.data.config) {
-          state.flux.config = { ...state.flux.config, ...cfgRes.data.config };
-        }
-        const prRes = await fluxApiFetch(`/api/flux/prompts?refs=${state.flux.refs.length}`);
-        if (prRes.ok && prRes.data.raw) {
-          state.flux.rawPrompts = prRes.data.raw;
-        }
-        recomputeFluxCollage();
-      }
-    } catch {
-      state.flux.apiOnline = false;
-    }
-    if (state.activeStep === 'flux') {
-      renderSidebar();
-    }
-  }
-
-  async function saveFluxConfigToDisk() {
-    try {
-      const res = await fluxApiFetch('/api/flux/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config: state.flux.config }),
-      });
-      if (!res.ok) throw new Error(res.data.error || 'Falha ao salvar config.py');
-      if (res.data.config) {
-        state.flux.config = { ...state.flux.config, ...res.data.config };
-      }
-      showToast('Configurações salvas em config.py!');
-      if (state.activeStep === 'flux') renderSidebar();
-    } catch (err) {
-      showToast(err.message || 'Erro ao salvar config.py.', true);
-    }
-  }
-
-  async function sendFluxResultToStep2() {
-    if (!state.fluxResultLoaded) {
-      showToast('Nenhum resultado FLUX.1 gerado ainda.', true);
-      return;
-    }
-    applyLoadedImage(state.fluxResultLoaded, 2);
-  }
-
-  async function runFluxGeneration() {
-    if (state.flux.isGenerating) return;
-    if (!state.fluxLeftPanelCanvas) {
-      showToast('Importe e divida o rosto na Etapa 1 antes de gerar.', true);
-      return;
-    }
-
-    state.flux.isGenerating = true;
-    state.flux.lastError = '';
-    if (state.activeStep === 'flux') renderSidebar();
-
-    try {
-      const leftDataUrl = state.fluxLeftPanelCanvas.toDataURL('image/png');
-      const refDataUrls = state.flux.refs.map((r) => r.dataUrl);
-      const payload = {
-        left_image_data_url: leftDataUrl,
-        reference_data_urls: refDataUrls,
-        prompt: state.flux.promptText,
-        config: state.flux.config,
-        save_folder: state.targetDataFolder,
-        save_config: true,
-      };
-
-      const res = await fluxApiFetch('/api/flux/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok || !res.data.ok) {
-        throw new Error(res.data.error || 'Falha na geração FLUX.1.');
-      }
-
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => reject(new Error('Falha ao decodificar PNG retornado pelo servidor.'));
-        img.src = res.data.result_data_url;
-      });
-
-      const loadedResult = {
-        img,
-        width: img.naturalWidth || img.width,
-        height: img.naturalHeight || img.height,
-        name: 'flux_kontext_output.png',
-      };
-      state.fluxResultLoaded = loadedResult;
-      state.fluxResultCanvas = Ops.sourceToCanvas(img);
-      state.flux.lastSavedResultPath = res.data.saved_result_path || '';
-      state.flux.lastSavedCollagePath = res.data.saved_collage_path || '';
-      state.flux.view = 'result';
-
-      await refreshFluxBackendState(false);
-
-      if (state.flux.autoSendToStep2) {
-        state.img2 = loadedResult;
-        state.img2Transform = { x: 0, y: 0, scale: 1, rotation: 0 };
-        state.step2View = 'align';
-        recomputeStep2Outputs();
-      }
-
-      syncAllUI();
-      showToast(
-        state.flux.autoSendToStep2
-          ? '✨ Imagem gerada com FLUX.1 e enviada para Etapa 2 (imagem2)!'
-          : '✨ Imagem gerada com FLUX.1!'
-      );
-    } catch (err) {
-      state.flux.lastError = err.message || 'Erro desconhecido na geração FLUX.1.';
-      showToast(state.flux.lastError, true);
-    } finally {
-      state.flux.isGenerating = false;
-      if (state.activeStep === 'flux') syncAllUI();
-    }
-  }
-
   // ===========================================================================
   // Importing Images (Upload, Drag & Drop, Ctrl+V Paste)
   // ===========================================================================
 
   /**
    * @param {LoadedImage} loaded
-   * @param {1 | 2 | 4 | 'flux-ref'} targetSlot
+   * @param {1 | 2 | 4} targetSlot
    */
   function applyLoadedImage(loaded, targetSlot) {
-    if (targetSlot === 'flux-ref') {
-      addFluxReferenceImages([loaded]);
-      return;
-    }
     if (targetSlot === 1) {
       const dimChanged =
         !state.img1 || state.img1.width !== loaded.width || state.img1.height !== loaded.height;
       state.img1 = loaded;
-      state.img1Canvas = Ops.sourceToCanvas(loaded.img);
+      setStateCanvas('img1Canvas', Ops.sourceToCanvas(loaded.img));
+      if (!state.currentProjectName) {
+        state.currentProjectName = (loaded.name || 'Projeto').replace(/\.[^.]+$/, '');
+      }
       if (dimChanged) {
         state.selection1 = null;
+        state.prevSelection1 = null;
         state.rawMask1 = null;
         state.customSelection2 = null;
+        state.prevCustomSelection2 = null;
         state.customRawMask2 = null;
       }
       viewport.setDocumentSize(loaded.width, loaded.height, true);
       recomputeStep1Outputs(true);
       state.activeStep = 1;
       syncAllUI();
+      scheduleAutoSaveProject();
       showToast(`imagem1 carregada (${loaded.width} × ${loaded.height} px).`);
     } else if (targetSlot === 2) {
       if (!state.img1Canvas) {
@@ -1224,6 +1162,7 @@
       recomputeStep2Outputs();
       state.activeStep = 2;
       syncAllUI();
+      scheduleAutoSaveProject();
 
       const sameRatio =
         Math.abs(loaded.width / loaded.height - state.img1Canvas.width / state.img1Canvas.height) <
@@ -1234,6 +1173,7 @@
           : `imagem2 carregada (${loaded.width} × ${loaded.height} px) — centralizada com padding transparente!`
       );
     } else if (targetSlot === 4) {
+      ensureStepComputed(3);
       if (!state.imgMergeCanvas || !state.mergeFaceMask) {
         showToast('Conclua até a imagemMerge (Etapa 3) antes de importar a face refinada.', true);
         return;
@@ -1241,7 +1181,6 @@
       state.imgRefined = loaded;
       state.refinedTransform = { x: 0, y: 0, scale: 1 };
 
-      // Smart target mode: if user exported cropped box OR image aspect closely matches crop box, snap to cropbox!
       if (state.exportCroppedMode && state.mergeFaceBox) {
         state.refinedTargetMode = 'cropbox';
       } else if (state.mergeFaceBox && state.img1Canvas) {
@@ -1265,16 +1204,16 @@
       recomputeStep4Outputs();
       state.activeStep = 4;
       syncAllUI();
+      scheduleAutoSaveProject();
       showToast('Resultado da IA (face + bordas precisas) importado!');
     }
   }
 
   /**
    * Determines which image slot receives a Ctrl+V paste or canvas drop based on activeStep.
-   * @returns {1 | 2 | 4 | 'flux-ref'}
+   * @returns {1 | 2 | 4}
    */
   function currentImportSlot() {
-    if (state.activeStep === 'flux') return 'flux-ref';
     if (!state.img1) return 1;
     if (state.activeStep === 1) return 1;
     if (state.activeStep === 2) return 2;
@@ -1319,18 +1258,6 @@
     }
   });
 
-  fileInputFluxRefs?.addEventListener('change', async () => {
-    const files = fileInputFluxRefs.files ? Array.from(fileInputFluxRefs.files) : [];
-    fileInputFluxRefs.value = '';
-    if (files.length === 0) return;
-    try {
-      const loadedList = await Promise.all(files.map((f) => Ops.loadImageFromBlob(f, f.name)));
-      addFluxReferenceImages(loadedList);
-    } catch (err) {
-      showToast(err.message || 'Erro ao carregar imagens de referência.', true);
-    }
-  });
-
   // Global Ctrl+V Paste listener
   window.addEventListener('paste', async (e) => {
     try {
@@ -1358,13 +1285,8 @@
     const files = e.dataTransfer ? Array.from(e.dataTransfer.files).filter((x) => x.type.startsWith('image/')) : [];
     if (files.length === 0) return;
     try {
-      if (state.activeStep === 'flux') {
-        const loadedList = await Promise.all(files.map((f) => Ops.loadImageFromBlob(f, f.name)));
-        addFluxReferenceImages(loadedList);
-      } else {
-        const loaded = await Ops.loadImageFromBlob(files[0], files[0].name);
-        applyLoadedImage(loaded, currentImportSlot());
-      }
+      const loaded = await Ops.loadImageFromBlob(files[0], files[0].name);
+      applyLoadedImage(loaded, currentImportSlot());
     } catch (err) {
       showToast(err.message || 'Falha ao soltar imagem.', true);
     }
@@ -1388,57 +1310,12 @@
     rs.targetSubBox = null;
     rs.compareBeforeCanvas = null;
 
-    if (state.activeStep === 'flux') {
-      if (!state.img1Canvas || !state.face1Canvas || !state.fluxLeftPanelCanvas) {
-        viewport.mode = 'view';
-        rs.primaryCanvas = null;
-        rs.emptyHintTitle = state.img1Canvas
-          ? 'Divida o rosto na Etapa 1 para alimentar o painel esquerdo'
-          : 'Importe e divida a imagem1 na Etapa 1';
-        rs.emptyHintSub =
-          'O segmento de rosto dividido da imagem1 será colocado mais à esquerda na colagem FLUX.1';
-        stageHintText.textContent =
-          'Colagem FLUX.1: Primeiro recorte/isole o rosto na Etapa 1. Depois adicione até 6 referências aqui.';
-        viewport._updateCursor();
-        viewport.requestRender();
-        return;
-      }
-
-      if (state.flux.view === 'result' && state.fluxResultCanvas) {
-        viewport.mode = 'pan';
-        rs.primaryCanvas = state.fluxResultCanvas;
-      } else if (
-        state.flux.view === 'compare' &&
-        state.fluxResultCanvas &&
-        state.fluxLeftPanelCanvas
-      ) {
-        viewport.mode = 'compare';
-        rs.primaryCanvas = state.fluxResultCanvas;
-        rs.compareBeforeCanvas = state.fluxLeftPanelCanvas;
-        rs.compareLabelBefore = 'Original (Esquerda)';
-        rs.compareLabelAfter = 'FLUX.1 Gerado';
-        rs.compareRatio = state.compareRatio;
-      } else if (state.flux.view === 'left') {
-        viewport.mode = 'pan';
-        rs.primaryCanvas = state.fluxLeftPanelCanvas;
-      } else {
-        viewport.mode = 'pan';
-        rs.primaryCanvas = state.fluxCollageCanvas || state.fluxLeftPanelCanvas;
-      }
-
-      if (rs.primaryCanvas) {
-        const fw = rs.primaryCanvas.width;
-        const fh = rs.primaryCanvas.height;
-        if (viewport.docW !== fw || viewport.docH !== fh) {
-          viewport.setDocumentSize(fw, fh, true);
-        }
-      }
-      stageHintText.textContent =
-        'Colagem FLUX.1: Esquerda = rosto dividido da imagem1 | Direita = até 6 referências (Ctrl+V ou arraste para adicionar).';
-      viewport._updateCursor();
-      viewport.requestRender();
-      return;
-    }
+    viewport.setPrecisionOptions({
+      enabled: state.precisionCut,
+      sensitivity: state.appSettings.precisionSensitivity,
+      loupeZoom: state.appSettings.loupeZoom,
+      loupeSize: state.appSettings.loupeSize,
+    });
 
     if (!state.img1Canvas) {
       viewport.mode = 'cut';
@@ -1484,8 +1361,9 @@
           });
         }
       }
-      stageHintText.textContent =
-        'Etapa 1: Segure o mouse para cortar tocando 2 bordas (pode vir de fora da imagem) ou fechar um laço.';
+      stageHintText.textContent = state.precisionCut
+        ? 'Modo Alta Precisão: deslize devagar com lupa; pode soltar o dedo, dar zoom com 2 dedos e continuar de onde parou.'
+        : 'Etapa 1: Segure o mouse/dedo para cortar tocando 2 bordas (pode vir de fora da imagem) ou fechar um laço.';
     } else if (state.activeStep === 2) {
       if (!state.img2 || !state.img2AlignedCanvas) {
         viewport.mode = 'view';
@@ -1739,15 +1617,14 @@
   // ===========================================================================
 
   function renderStepper() {
-    /** @type {{ id: 1 | 'flux' | 2 | 3 | 4 | 5 | 6, num: string, label: string, done: boolean, isFlux?: boolean }[]} */
+    /** @type {{ id: 1 | 2 | 3 | 4 | 5 | 6, num: string, label: string, done: boolean }[]} */
     const steps = [
-      { id: 1, num: '1', label: 'imagem1 • Corpo', done: !!(state.img1 && state.faceMask1) },
-      { id: 'flux', num: '⚡', label: 'Colagem FLUX', done: !!state.fluxResultCanvas, isFlux: true },
-      { id: 2, num: '2', label: 'IA → imagem2 • Face', done: !!(state.img2 && state.face2Canvas) },
-      { id: 3, num: '3', label: 'imagemMerge • Bordas', done: !!(state.imgMergeCanvas && state.faceImprecisaCanvas) },
-      { id: 4, num: '4', label: 'IA → Bordas Precisas', done: !!state.facePrecisaCanvas },
-      { id: 5, num: '5', label: 'imagemFinal', done: !!state.imgFinalCanvas },
-      { id: 6, num: '6', label: 'Pós • Tom de Pele', done: !!(state.imgPostCanvas && state.skinPost.enabled) },
+      { id: 1, num: '1', label: 'img1 • Corpo', done: !!(state.img1 && state.faceMask1) },
+      { id: 2, num: '2', label: 'img2 • Face', done: !!(state.img2 && (state.face2Canvas || dirtySteps[2])) },
+      { id: 3, num: '3', label: 'Merge • Bordas', done: !!(state.imgMergeCanvas || (state.img2 && state.faceMask1)) },
+      { id: 4, num: '4', label: 'IA • Precisa', done: !!(state.imgRefined && (state.facePrecisaCanvas || dirtySteps[4])) },
+      { id: 5, num: '5', label: 'imgFinal', done: !!(state.imgFinalCanvas || (state.imgRefined && dirtySteps[5])) },
+      { id: 6, num: '6', label: 'Pós • Pele', done: !!(state.skinPost.enabled && (state.imgPostCanvas || (state.imgRefined && dirtySteps[6]))) },
     ];
 
     stepperNav.innerHTML = '';
@@ -1756,20 +1633,18 @@
     steps.forEach((s, idx) => {
       const btn = document.createElement('button');
       const isActive = state.activeStep === s.id;
-      btn.className = `step-btn${s.isFlux ? ' flux-pill' : ''}${isActive ? ' active' : ''}${s.done ? ' done' : ''}`;
+      btn.className = `step-btn${isActive ? ' active' : ''}${s.done ? ' done' : ''}`;
       btn.innerHTML = `<span class="step-num">${s.done && !isActive ? '✓' : s.num}</span><span>${s.label}</span>`;
       if (isActive) {
         activeBtn = btn;
         if (sheetStepLabel) {
-          sheetStepLabel.textContent = `${s.num}${s.isFlux ? '' : '.'} ${s.label}`;
+          sheetStepLabel.textContent = `${s.num}. ${s.label}`;
         }
       }
       btn.addEventListener('click', () => {
+        if (state.activeView !== 'studio') setActiveView('studio');
         state.activeStep = s.id;
-        if (s.id === 'flux') {
-          recomputeFluxCollage();
-          refreshFluxBackendState(false);
-        }
+        ensureStepComputed(s.id);
         syncAllUI();
       });
       stepperNav.appendChild(btn);
@@ -1785,6 +1660,29 @@
     if (activeBtn && isMobileLayout()) {
       activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
     }
+  }
+
+  function togglePrecisionCut() {
+    state.precisionCut = !state.precisionCut;
+    viewport.setPrecisionOptions({
+      enabled: state.precisionCut,
+      sensitivity: state.appSettings.precisionSensitivity,
+      loupeZoom: state.appSettings.loupeZoom,
+      loupeSize: state.appSettings.loupeSize,
+    });
+    if (state.precisionCut && state.activeStep === 1) {
+      state.step1Tool = 'cut';
+      state.step1View = 'split';
+      if (isMobileLayout() && mobileSheetMode === 'expanded') setMobileSheetState('peek');
+    } else if (state.precisionCut && state.activeStep === 3) {
+      state.step3Tool = 'cut';
+    }
+    syncAllUI();
+    showToast(
+      state.precisionCut
+        ? 'Lupa de Alta Precisão ativada: pode soltar o dedo e continuar de onde parou.'
+        : 'Modo de corte rápido ativado.'
+    );
   }
 
   function renderStageToolbar() {
@@ -1804,42 +1702,25 @@
       return b;
     };
 
-    if (state.activeStep === 'flux') {
-      addPill('🧩 Colagem Concatenada', state.flux.view === 'collage', () => {
-        state.flux.view = 'collage';
-        syncViewportScene();
-        renderStageToolbar();
-      });
-      addPill('👤 Rosto Esquerdo', state.flux.view === 'left', () => {
-        state.flux.view = 'left';
-        syncViewportScene();
-        renderStageToolbar();
-      });
-      if (state.fluxResultCanvas) {
-        addPill('✨ Resultado FLUX', state.flux.view === 'result', () => {
-          state.flux.view = 'result';
-          syncViewportScene();
-          renderStageToolbar();
-        });
-        addPill('↔ Comparar (Esq vs FLUX)', state.flux.view === 'compare', () => {
-          state.flux.view = 'compare';
-          syncViewportScene();
-          renderStageToolbar();
-        });
-      }
-      addPill(`+ Add Ref (${state.flux.refs.length}/6)`, false, () => {
-        fileInputFluxRefs?.click();
-      });
-      addPill('📋 Colar Ref (Ctrl+V)', false, () => {
-        triggerClipboardPaste('flux-ref');
-      });
-    } else if (state.activeStep === 1) {
+    const strokeInfo = viewport.getStrokeState();
+
+    if (state.activeStep === 1) {
       addPill('✂ Cortar / Laço', state.step1Tool === 'cut', () => {
         state.step1Tool = 'cut';
         if (isMobileLayout() && mobileSheetMode === 'expanded') setMobileSheetState('peek');
         syncViewportScene();
         renderStageToolbar();
       });
+      addPill('🔍 Precisão Lupa', state.precisionCut, togglePrecisionCut);
+      if (strokeInfo.active || state.prevSelection1) {
+        addPill('↩ Desfazer', false, undoCutAction);
+      }
+      if (strokeInfo.active && strokeInfo.points >= 3) {
+        addPill('✓ Fechar Laço', true, () => viewport.finishPrecisionLasso());
+      }
+      if (strokeInfo.active) {
+        addPill('✕ Cancelar', false, () => viewport.cancelActiveStroke());
+      }
       addPill('✨ Auto Selecionar', false, () => {
         openAutoSelectModal();
       });
@@ -1922,6 +1803,16 @@
           syncViewportScene();
           renderStageToolbar();
         });
+        addPill('🔍 Precisão Lupa', state.precisionCut, togglePrecisionCut);
+        if (strokeInfo.active || state.prevCustomSelection2) {
+          addPill('↩ Desfazer', false, undoCutAction);
+        }
+        if (strokeInfo.active && strokeInfo.points >= 3) {
+          addPill('✓ Fechar Laço', true, () => viewport.finishPrecisionLasso());
+        }
+        if (strokeInfo.active) {
+          addPill('✕ Cancelar', false, () => viewport.cancelActiveStroke());
+        }
         addPill('✋ Mover Vista', state.step3Tool === 'pan', () => {
           state.step3Tool = 'pan';
           syncViewportScene();
@@ -2036,6 +1927,7 @@
    */
   function mountThumb(wrap, sourceCanvas) {
     if (!wrap) return;
+    wrap.querySelectorAll('canvas').forEach((oldC) => Ops.releaseCanvas(oldC));
     wrap.innerHTML = '';
     if (!sourceCanvas) {
       const span = document.createElement('span');
@@ -2075,9 +1967,7 @@
   function renderSidebar() {
     sidebarContent.innerHTML = '';
 
-    if (state.activeStep === 'flux') {
-      renderSidebarFlux();
-    } else if (state.activeStep === 1) {
+    if (state.activeStep === 1) {
       renderSidebarStep1();
     } else if (state.activeStep === 2) {
       renderSidebarStep2();
@@ -2132,11 +2022,24 @@
 
       <div class="panel-card">
         <div class="card-header">
-          <div class="card-title">Seleção &amp; Papel Fixo</div>
+          <div class="card-title">Seleção &amp; Corte de Precisão</div>
           ${selBadge}
         </div>
         <div class="btn-row">
-          <button class="btn btn-cyan btn-sm" style="flex:1.4;font-weight:700" id="btnAutoSelectFace" title="Auto selecionar caso já possua imagem completa e rosto já isolado (complemento vira corpo)">
+          <button class="btn btn-sm ${state.precisionCut ? 'btn-primary' : ''}" style="flex:1.3" id="btnSbPrecision1" title="Ativa lupa ampliada, sensibilidade reduzida e permite soltar o dedo e continuar">
+            🔍 ${state.precisionCut ? 'Lupa Precisão ON' : 'Lupa Precisão'}
+          </button>
+          <button class="btn btn-sm" id="btnSbUndo1" ${!viewport.hasActiveStroke() && !state.prevSelection1 ? 'disabled' : ''} title="Desfaz último trecho desenhado ou seleção anterior">
+            ↩ Desfazer
+          </button>
+        </div>
+        ${
+          state.precisionCut
+            ? `<div class="precision-status-bar"><span>Lupa ${state.appSettings.loupeZoom.toFixed(1)}× • Solte o dedo e continue de onde parou</span></div>`
+            : ''
+        }
+        <div class="btn-row">
+          <button class="btn btn-sm" style="flex:1.4;font-weight:700" id="btnAutoSelectFace" title="Auto selecionar caso já possua imagem completa e rosto já isolado (complemento vira corpo)">
             ✨ Auto Selecionar
           </button>
           <button class="btn btn-amber btn-sm" style="flex:1" id="sbFlipRole1" ${!state.faceMask1 ? 'disabled' : ''}>
@@ -2173,30 +2076,31 @@
         </div>
       </div>
 
-      <button class="btn btn-violet btn-block" id="sbGoToFlux" ${!state.face1Canvas ? 'disabled' : ''}>
-        ⚡ Colagem FLUX.1 (Usar Face Dividida) →
-      </button>
       <button class="btn btn-primary btn-block" id="sbNextTo2" ${!state.img1Canvas ? 'disabled' : ''}>
         Avançar para Etapa 2 (imagem2) →
       </button>
     `;
 
-    document.getElementById('sbGoToFlux')?.addEventListener('click', () => {
-      state.activeStep = 'flux';
-      recomputeFluxCollage();
-      refreshFluxBackendState(false);
-      syncAllUI();
-    });
-
+    document.getElementById('btnSbPrecision1')?.addEventListener('click', togglePrecisionCut);
+    document.getElementById('btnSbUndo1')?.addEventListener('click', undoCutAction);
     document.getElementById('sbImportImg1')?.addEventListener('click', () => fileInputImg1.click());
     document.getElementById('sbPasteImg1')?.addEventListener('click', () => triggerClipboardPaste(1));
     document.getElementById('btnAutoSelectFace')?.addEventListener('click', openAutoSelectModal);
     document.getElementById('sbFlipRole1')?.addEventListener('click', flipCorpoAndFaceRole);
     document.getElementById('sbClearCut1')?.addEventListener('click', () => {
+      if (state.selection1) {
+        state.prevSelection1 = {
+          selection: state.selection1,
+          rawMask: state.rawMask1,
+          faceIsOne: state.faceIsOne1,
+        };
+      }
+      viewport.cancelActiveStroke();
       state.selection1 = null;
       state.rawMask1 = null;
       recomputeStep1Outputs(true);
       syncAllUI();
+      scheduleAutoSaveProject();
     });
 
     document.getElementById('btnPromptOrigHair')?.addEventListener('click', async () => {
@@ -2229,609 +2133,68 @@
         showToast('Dica: desenhe o corte na imagem1 agora ou volte depois — ela sincroniza automaticamente!');
       }
       state.activeStep = 2;
+      ensureStepComputed(2);
       syncAllUI();
     });
   }
 
-  function renderSidebarFlux() {
-    const f = state.flux;
-    const cfg = f.config;
-    const st = f.status;
-    const missing = (st && Array.isArray(st.missing_packages) ? st.missing_packages : []);
-    const isGated =
-      cfg.model_id === 'black-forest-labs/FLUX.1-dev' ||
-      cfg.model_id === 'black-forest-labs/FLUX.1-Kontext-dev';
-    const tokenMissing = st && isGated && !st.hf_token_configured;
+  /**
+   * Binds manual numeric inputs cleanly so users can select, delete, type negative numbers,
+   * decimals (. or ,), and overwrite from any digit without cursor locking.
+   *
+   * @param {HTMLInputElement | null} inputEl
+   * @param {{ min: number, max: number, decimals?: number, fallback?: number, onValid: (n: number) => void, onCommit?: (n: number) => void }} opts
+   */
+  function bindNumericInput(inputEl, opts) {
+    if (!inputEl) return;
+    const dec = opts.decimals ?? 0;
+    const formatNum = (n) => (dec > 0 ? Number(n).toFixed(dec) : String(Math.round(n)));
+    let valueOnFocus = inputEl.value;
 
-    const statusBadge = f.isGenerating
-      ? '<span class="badge amber">⏳ Gerando...</span>'
-      : f.apiOnline
-      ? `<span class="badge emerald">${st && st.cuda_available ? escapeHtml(st.gpu_name || 'CUDA OK') : 'API Online'}</span>`
-      : '<span class="badge amber">API Offline</span>';
-
-    const vramInfo =
-      st && st.cuda_available && st.vram_total_mb
-        ? `${Math.round(st.vram_free_mb / 1024 * 10) / 10}/${Math.round(st.vram_total_mb / 1024 * 10) / 10} GB livres`
-        : st && st.status_message
-        ? escapeHtml(st.status_message)
-        : 'Inicie flux_server.py ou abrir_app.bat';
-
-    const leftDims = state.fluxLeftPanelCanvas
-      ? `${state.fluxLeftPanelCanvas.width}×${state.fluxLeftPanelCanvas.height}`
-      : '—';
-    const collageDims = state.fluxCollageCanvas
-      ? `${state.fluxCollageCanvas.width}×${state.fluxCollageCanvas.height}`
-      : '—';
-
-    const refsCardsHtml =
-      f.refs.length === 0
-        ? `<div class="help-text" style="text-align:center;padding:8px 4px">Nenhuma referência adicionada ainda. Adicione até <strong>6 imagens</strong> (ou cole com Ctrl+V / arraste no canvas).</div>`
-        : `<div class="flux-refs-grid">
-            ${f.refs
-              .map(
-                (item, idx) => `
-              <div class="flux-ref-item">
-                <div class="flux-ref-head">
-                  <span>Ref ${idx + 1}</span>
-                  <span>${item.loaded.width}×${item.loaded.height}</span>
-                </div>
-                <div class="flux-ref-thumb">
-                  <img src="${item.dataUrl}" alt="Ref ${idx + 1}" />
-                </div>
-                <div class="flux-ref-actions">
-                  <button class="btn btn-xs" data-flux-move-left="${idx}" ${idx === 0 ? 'disabled' : ''} title="Mover para esquerda">←</button>
-                  <button class="btn btn-xs" data-flux-move-right="${idx}" ${idx === f.refs.length - 1 ? 'disabled' : ''} title="Mover para direita">→</button>
-                  <button class="btn btn-xs btn-ghost" data-flux-remove="${idx}" title="Remover">✕</button>
-                </div>
-              </div>
-            `
-              )
-              .join('')}
-          </div>`;
-
-    const subtabCollageHtml = `
-      <div class="panel-card highlight-cyan">
-        <div class="card-header">
-          <div class="card-title">1. Esquerda (Original — Rosto Dividido)</div>
-          <span class="badge cyan">${leftDims} px</span>
-        </div>
-        ${
-          !state.face1Canvas
-            ? `
-          <div class="flux-missing-box">
-            Divida a <strong>imagem1</strong> na Etapa 1 para selecionar o segmento de rosto.
-            <div style="margin-top:5px">
-              <button class="btn btn-xs btn-primary" id="btnFluxBackStep1">← Ir para Etapa 1</button>
-            </div>
-          </div>
-        `
-            : `
-          <div class="piece-grid">
-            <div class="piece-card featured">
-              <div class="piece-title"><span>Painel Esquerdo</span><span class="badge cyan">Orig</span></div>
-              <div class="piece-thumb-wrap" id="thumbFluxLeft"></div>
-            </div>
-            <div class="piece-card">
-              <div class="piece-title"><span>Colagem Total</span><span class="badge emerald">${1 + f.refs.length} painéis</span></div>
-              <div class="piece-thumb-wrap" id="thumbFluxCollage"></div>
-            </div>
-          </div>
-          <div class="flux-config-grid" style="margin-top:4px">
-            <div class="flux-field">
-              <label>Origem Esquerda</label>
-              <select class="flux-select" id="selFluxLeftSrc">
-                <option value="face1" ${f.leftSource === 'face1' ? 'selected' : ''}>Rosto Dividido (face1)</option>
-                <option value="img1" ${f.leftSource === 'img1' ? 'selected' : ''}>imagem1 Completa</option>
-              </select>
-            </div>
-            <div class="flux-field">
-              <label>Fundo / Transparência</label>
-              <select class="flux-select" id="selFluxBgQuick">
-                <option value="#000000" ${cfg.collage_bg_color === '#000000' ? 'selected' : ''}>Preto (#000000)</option>
-                <option value="#ffffff" ${cfg.collage_bg_color === '#ffffff' ? 'selected' : ''}>Branco (#FFFFFF)</option>
-                <option value="#808080" ${cfg.collage_bg_color === '#808080' ? 'selected' : ''}>Cinza (#808080)</option>
-              </select>
-            </div>
-          </div>
-          <label class="checkbox-row" style="margin-top:3px">
-            <input type="checkbox" id="chkFluxCropFace" ${f.cropLeftToFace ? 'checked' : ''} ${f.leftSource !== 'face1' ? 'disabled' : ''} />
-            <span>Recortar justo ao segmento do rosto (padding ${f.cropPadPx} px)</span>
-          </label>
-        `
-        }
-      </div>
-
-      <div class="panel-card">
-        <div class="card-header">
-          <div class="card-title">2. Referências Concatenadas à Direita</div>
-          <span class="badge ${f.refs.length > 0 ? 'emerald' : ''}">${f.refs.length} / 6</span>
-        </div>
-        <div class="btn-row">
-          <button class="btn btn-primary btn-sm" style="flex:1" id="btnFluxAddRefs" ${f.refs.length >= 6 ? 'disabled' : ''}>
-            📂 Escolher (até 6)
-          </button>
-          <button class="btn btn-sm" id="btnFluxPasteRef" ${f.refs.length >= 6 ? 'disabled' : ''}>
-            📋 Colar
-          </button>
-          <button class="btn btn-ghost btn-sm" id="btnFluxClearRefs" ${f.refs.length === 0 ? 'disabled' : ''}>
-            Limpar
-          </button>
-        </div>
-        ${refsCardsHtml}
-      </div>
-
-      <div class="panel-card">
-        <div class="card-header">
-          <div class="card-title">3. Prompt (.txt Adaptado p/ Colagem)</div>
-          <button class="btn btn-xs btn-ghost" id="btnFluxCopyPrompt">📋 Copiar</button>
-        </div>
-        <div class="segmented">
-          <button class="seg-btn ${f.promptTemplate === 'original_hair' ? 'active' : ''}" id="segPromptOrigHair">
-            Cabelo Original
-          </button>
-          <button class="seg-btn ${f.promptTemplate === 'reference_hair' ? 'active' : ''}" id="segPromptRefHair">
-            Cabelo Ref
-          </button>
-          <button class="seg-btn ${f.promptTemplate === 'custom' ? 'active' : ''}" id="segPromptCustom">
-            Custom
-          </button>
-        </div>
-        <textarea class="flux-prompt-box" id="txtFluxPrompt">${escapeHtml(f.promptText)}</textarea>
-        <div class="btn-row">
-          <button class="btn btn-xs btn-ghost" style="flex:1" id="btnFluxResetPrompt">
-            ↺ Re-adaptar do .txt (${1 + f.refs.length} painéis)
-          </button>
-        </div>
-      </div>
-
-      ${
-        state.fluxResultCanvas
-          ? `
-        <div class="panel-card highlight-cyan">
-          <div class="card-header">
-            <div class="card-title">Resultado Gerado (FLUX.1)</div>
-            <span class="badge emerald">${state.fluxResultCanvas.width}×${state.fluxResultCanvas.height}</span>
-          </div>
-          <div class="piece-grid single">
-            <div class="piece-card featured">
-              <div class="piece-thumb-wrap" id="thumbFluxResult" style="height:78px"></div>
-              <div class="piece-actions">
-                <button class="btn" id="copyFluxResult">📋 Copiar</button>
-                <button class="btn" id="dlFluxResult">⬇ Salvar</button>
-                <button class="btn btn-emerald" id="btnFluxUseAsImg2">➜ Usar na Etapa 2</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      `
-          : ''
-      }
-    `;
-
-    const subtabConfigHtml = `
-      <div class="panel-card highlight-cyan">
-        <div class="card-header">
-          <div class="card-title">Configurações de config.py</div>
-          <span class="badge cyan">${cfg.use_8bit_quantization ? (cfg.quantization_mode === '4bit' ? '4-bit NF4' : '8-bit') : 'BF16'}</span>
-        </div>
-
-        <div class="flux-field">
-          <label for="cfgModelId">Modelo (model_id)</label>
-          <select class="flux-select" id="cfgModelId">
-            <option value="black-forest-labs/FLUX.1-dev" ${cfg.model_id === 'black-forest-labs/FLUX.1-dev' ? 'selected' : ''}>black-forest-labs/FLUX.1-dev</option>
-            <option value="black-forest-labs/FLUX.1-Kontext-dev" ${cfg.model_id === 'black-forest-labs/FLUX.1-Kontext-dev' ? 'selected' : ''}>black-forest-labs/FLUX.1-Kontext-dev</option>
-            <option value="black-forest-labs/FLUX.1-schnell" ${cfg.model_id === 'black-forest-labs/FLUX.1-schnell' ? 'selected' : ''}>black-forest-labs/FLUX.1-schnell (4 steps)</option>
-          </select>
-        </div>
-
-        <div class="flux-config-grid">
-          <div class="flux-field">
-            <label for="cfgDevice">Dispositivo (device)</label>
-            <select class="flux-select" id="cfgDevice">
-              <option value="cuda" ${cfg.device === 'cuda' ? 'selected' : ''}>cuda (GPU)</option>
-              <option value="cpu" ${cfg.device === 'cpu' ? 'selected' : ''}>cpu</option>
-            </select>
-          </div>
-          <div class="flux-field">
-            <label for="cfgOutSizeMode">Saída (output_size_mode)</label>
-            <select class="flux-select" id="cfgOutSizeMode">
-              <option value="auto" ${cfg.output_size_mode === 'auto' ? 'selected' : ''}>auto (Kontext=Esq / Dev=Colagem)</option>
-              <option value="left_image" ${cfg.output_size_mode === 'left_image' ? 'selected' : ''}>left_image (Proporção Esq.)</option>
-              <option value="collage" ${cfg.output_size_mode === 'collage' ? 'selected' : ''}>collage (Proporção Colagem)</option>
-              <option value="square_1024" ${cfg.output_size_mode === 'square_1024' ? 'selected' : ''}>square_1024 (1024×1024)</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="flux-config-grid">
-          <label class="checkbox-row">
-            <input type="checkbox" id="cfgUse8Bit" ${cfg.use_8bit_quantization ? 'checked' : ''} />
-            <span>Quantização BitsAndBytes (evita swap RAM)</span>
-          </label>
-          <div class="flux-field">
-            <label for="cfgQuantMode">Modo Quantização</label>
-            <select class="flux-select" id="cfgQuantMode" ${!cfg.use_8bit_quantization ? 'disabled' : ''}>
-              <option value="4bit" ${(cfg.quantization_mode || '4bit') === '4bit' ? 'selected' : ''}>4-bit NF4 (~6.5 GB • Rápido)</option>
-              <option value="8bit" ${cfg.quantization_mode === '8bit' ? 'selected' : ''}>8-bit INT8 (~12 GB)</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="control-row">
-          <div class="control-label">
-            <span>strength (Img2Img; ignorado no Kontext)</span>
-            <span class="control-val" id="valCfgStrength">${Number(cfg.strength).toFixed(2)}</span>
-          </div>
-          <div class="slider-line">
-            <input type="range" id="rngCfgStrength" min="0" max="1" step="0.01" value="${cfg.strength}" />
-            <input type="number" class="num-input" id="numCfgStrength" min="0" max="1" step="0.01" value="${cfg.strength}" />
-          </div>
-        </div>
-
-        <div class="flux-config-grid">
-          <div class="flux-field">
-            <label for="cfgSteps">num_inference_steps</label>
-            <input type="number" class="flux-input" id="cfgSteps" min="1" max="100" placeholder="Auto (28 dev / 4 schnell)" value="${cfg.num_inference_steps ?? ''}" />
-          </div>
-          <div class="flux-field">
-            <label for="cfgGuidance">guidance_scale</label>
-            <input type="number" class="flux-input" id="cfgGuidance" min="0" max="20" step="0.1" placeholder="Auto (3.5 / 0.0)" value="${cfg.guidance_scale ?? ''}" />
-          </div>
-        </div>
-
-        <div class="flux-config-grid">
-          <div class="flux-field">
-            <label for="cfgSeed">seed (vazio = aleatória)</label>
-            <input type="number" class="flux-input" id="cfgSeed" placeholder="Aleatória" value="${cfg.seed ?? ''}" />
-          </div>
-          <div class="flux-field">
-            <label for="cfgMegapixels">target_megapixels</label>
-            <input type="number" class="flux-input" id="cfgMegapixels" min="0.25" max="2.5" step="0.1" value="${cfg.target_megapixels ?? 1.0}" />
-          </div>
-        </div>
-
-        <div class="flux-config-grid">
-          <div class="flux-field">
-            <label for="cfgGapPx">collage_gap_px</label>
-            <input type="number" class="flux-input" id="cfgGapPx" min="0" max="48" step="1" value="${cfg.collage_gap_px ?? 4}" />
-          </div>
-          <div class="flux-field">
-            <label for="cfgBgColor">collage_bg_color</label>
-            <input type="text" class="flux-input" id="cfgBgColor" value="${escapeHtml(cfg.collage_bg_color || '#000000')}" />
-          </div>
-        </div>
-
-        <div class="flux-field">
-          <label for="cfgImagePath">image_path (CLI fallback)</label>
-          <input type="text" class="flux-input" id="cfgImagePath" value="${escapeHtml(cfg.image_path || '')}" />
-        </div>
-        <div class="flux-field">
-          <label for="cfgOutputPath">output_path (CLI / Cópia extra)</label>
-          <input type="text" class="flux-input" id="cfgOutputPath" value="${escapeHtml(cfg.output_path || '')}" />
-        </div>
-        <div class="flux-field">
-          <label for="cfgPromptFile">prompt_file (opcional no CLI)</label>
-          <input type="text" class="flux-input" id="cfgPromptFile" placeholder="None (usa prompt da tela)" value="${escapeHtml(cfg.prompt_file || '')}" />
-        </div>
-
-        <div class="btn-row" style="margin-top:4px">
-          <button class="btn btn-emerald btn-sm" style="flex:1" id="btnSaveFluxConfig">💾 Salvar no config.py</button>
-          <button class="btn btn-sm" id="btnReloadFluxConfig">↺ Recarregar</button>
-        </div>
-      </div>
-    `;
-
-    sidebarContent.innerHTML = `
-      <div class="flux-status-banner ${f.apiOnline && missing.length === 0 ? 'ok' : 'warn'}">
-        <div style="display:flex;flex-direction:column;gap:1px">
-          <span style="font-weight:700;color:var(--text-main)">FLUX.1 Contextual (${collageDims})</span>
-          <span style="font-size:10px;color:var(--text-secondary)">${vramInfo}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:4px">
-          ${statusBadge}
-          <button class="btn btn-xs btn-ghost" id="btnRefreshFluxStatus" title="Atualizar status GPU/API">↻</button>
-        </div>
-      </div>
-
-      ${
-        missing.length > 0
-          ? `<div class="flux-missing-box"><strong>Pacotes ausentes:</strong> ${escapeHtml(missing.join(', '))}. Execute <code>pip install -r requirements.txt</code> no terminal.</div>`
-          : ''
-      }
-      ${
-        tokenMissing
-          ? `<div class="flux-missing-box"><strong>HF_TOKEN não detectado</strong> no <code>.env</code> para ${escapeHtml(cfg.model_id)}.</div>`
-          : ''
-      }
-      ${
-        f.lastError
-          ? `<div class="flux-missing-box" style="border-color:rgba(239,68,68,0.5);color:#fecaca">${escapeHtml(f.lastError)}</div>`
-          : ''
-      }
-
-      <div class="subtabs-nav">
-        <button class="subtab-btn ${state.fluxSubtab === 'collage' ? 'active' : ''}" id="tabFluxCollage">
-          🧩 Colagem &amp; Prompt
-        </button>
-        <button class="subtab-btn ${state.fluxSubtab === 'config' ? 'active' : ''}" id="tabFluxConfig">
-          ⚙ Config (config.py)
-        </button>
-      </div>
-
-      <div class="panel-card">
-        <button class="btn btn-violet btn-block" id="btnFluxGenerate" ${
-          f.isGenerating || !state.fluxLeftPanelCanvas ? 'disabled' : ''
-        }>
-          ${f.isGenerating ? '⏳ Gerando com FLUX.1...' : '🚀 Gerar com FLUX.1 (PIL Colagem + IA)'}
-        </button>
-        <label class="checkbox-row">
-          <input type="checkbox" id="chkFluxAutoStep2" ${f.autoSendToStep2 ? 'checked' : ''} />
-          <span>Enviar resultado automaticamente para Etapa 2 (imagem2)</span>
-        </label>
-        <div class="btn-row">
-          <button class="btn btn-sm" style="flex:1" id="btnFluxDlCollage" ${!state.fluxCollageCanvas ? 'disabled' : ''}>
-            ⬇ Baixar Colagem
-          </button>
-          <button class="btn btn-sm btn-ghost" id="btnFluxUnloadVram" ${!f.apiOnline || f.isGenerating ? 'disabled' : ''}>
-            🧹 Limpar VRAM
-          </button>
-        </div>
-      </div>
-
-      ${state.fluxSubtab === 'config' ? subtabConfigHtml : subtabCollageHtml}
-    `;
-
-    // Bind navigation & status
-    document.getElementById('tabFluxCollage')?.addEventListener('click', () => {
-      state.fluxSubtab = 'collage';
-      renderSidebar();
-    });
-    document.getElementById('tabFluxConfig')?.addEventListener('click', () => {
-      state.fluxSubtab = 'config';
-      renderSidebar();
-    });
-    document.getElementById('btnRefreshFluxStatus')?.addEventListener('click', () => {
-      refreshFluxBackendState(true);
-      showToast('Status da GPU e config.py recarregados.');
-    });
-    document.getElementById('btnFluxBackStep1')?.addEventListener('click', () => {
-      state.activeStep = 1;
-      syncAllUI();
-    });
-
-    // Collage controls
-    document.getElementById('selFluxLeftSrc')?.addEventListener('change', (e) => {
-      state.flux.leftSource = /** @type {'face1' | 'img1'} */ (
-        /** @type {HTMLSelectElement} */ (e.target).value
-      );
-      recomputeFluxCollage();
-      syncAllUI();
-    });
-    document.getElementById('selFluxBgQuick')?.addEventListener('change', (e) => {
-      state.flux.config.collage_bg_color = /** @type {HTMLSelectElement} */ (e.target).value;
-      recomputeFluxCollage();
-      syncAllUI();
-    });
-    document.getElementById('chkFluxCropFace')?.addEventListener('change', (e) => {
-      state.flux.cropLeftToFace = /** @type {HTMLInputElement} */ (e.target).checked;
-      recomputeFluxCollage();
-      syncAllUI();
-    });
-
-    // Reference list controls
-    document.getElementById('btnFluxAddRefs')?.addEventListener('click', () => {
-      fileInputFluxRefs?.click();
-    });
-    document.getElementById('btnFluxPasteRef')?.addEventListener('click', () => {
-      triggerClipboardPaste('flux-ref');
-    });
-    document.getElementById('btnFluxClearRefs')?.addEventListener('click', () => {
-      state.flux.refs = [];
-      recomputeFluxCollage();
-      syncAllUI();
-    });
-
-    sidebarContent.querySelectorAll('[data-flux-remove]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-flux-remove'));
-        if (Number.isInteger(idx) && idx >= 0 && idx < state.flux.refs.length) {
-          state.flux.refs.splice(idx, 1);
-          recomputeFluxCollage();
-          syncAllUI();
-        }
-      });
-    });
-    sidebarContent.querySelectorAll('[data-flux-move-left]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-flux-move-left'));
-        if (idx > 0 && idx < state.flux.refs.length) {
-          const tmp = state.flux.refs[idx - 1];
-          state.flux.refs[idx - 1] = state.flux.refs[idx];
-          state.flux.refs[idx] = tmp;
-          recomputeFluxCollage();
-          syncAllUI();
-        }
-      });
-    });
-    sidebarContent.querySelectorAll('[data-flux-move-right]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-flux-move-right'));
-        if (idx >= 0 && idx < state.flux.refs.length - 1) {
-          const tmp = state.flux.refs[idx + 1];
-          state.flux.refs[idx + 1] = state.flux.refs[idx];
-          state.flux.refs[idx] = tmp;
-          recomputeFluxCollage();
-          syncAllUI();
-        }
-      });
-    });
-
-    // Prompt controls
-    document.getElementById('segPromptOrigHair')?.addEventListener('click', () => {
-      state.flux.promptTemplate = 'original_hair';
-      state.flux.promptDirty = false;
-      refreshFluxAdaptedPrompt(true);
-      renderSidebar();
-    });
-    document.getElementById('segPromptRefHair')?.addEventListener('click', () => {
-      state.flux.promptTemplate = 'reference_hair';
-      state.flux.promptDirty = false;
-      refreshFluxAdaptedPrompt(true);
-      renderSidebar();
-    });
-    document.getElementById('segPromptCustom')?.addEventListener('click', () => {
-      state.flux.promptTemplate = 'custom';
-      state.flux.promptDirty = true;
-      renderSidebar();
-    });
-    const txtPrompt = /** @type {HTMLTextAreaElement | null} */ (
-      document.getElementById('txtFluxPrompt')
-    );
-    txtPrompt?.addEventListener('input', () => {
-      state.flux.promptText = txtPrompt.value;
-      state.flux.config.prompt = txtPrompt.value;
-      state.flux.promptDirty = true;
-    });
-    document.getElementById('btnFluxResetPrompt')?.addEventListener('click', () => {
-      if (state.flux.promptTemplate === 'custom') {
-        state.flux.promptTemplate = 'original_hair';
-      }
-      state.flux.promptDirty = false;
-      refreshFluxAdaptedPrompt(true);
-      renderSidebar();
-      showToast('Prompt re-adaptado para o número atual de imagens.');
-    });
-    document.getElementById('btnFluxCopyPrompt')?.addEventListener('click', async () => {
+    inputEl.addEventListener('focus', () => {
+      valueOnFocus = inputEl.value;
       try {
-        await Ops.copyTextToClipboard(state.flux.promptText || '');
-        showToast('Prompt adaptado copiado!');
-      } catch (err) {
-        showToast('Falha ao copiar prompt: ' + err.message, true);
+        inputEl.select();
+      } catch (_) {}
+      const preventUp = (upEv) => {
+        upEv.preventDefault();
+        inputEl.removeEventListener('mouseup', preventUp);
+      };
+      inputEl.addEventListener('mouseup', preventUp, { once: true });
+    });
+
+    inputEl.addEventListener('input', () => {
+      const normalized = inputEl.value.replace(/,/g, '.').trim();
+      if (normalized === '' || normalized === '-' || normalized === '.' || normalized === '-.') {
+        return;
       }
+      const parsed = Number(normalized);
+      if (!Number.isFinite(parsed)) return;
+      const clamped = Math.max(opts.min, Math.min(opts.max, parsed));
+      opts.onValid(clamped);
     });
 
-    // Result actions
-    if (state.fluxResultCanvas) {
-      bindCopyDownload(
-        'copyFluxResult',
-        'dlFluxResult',
-        () => state.fluxResultCanvas,
-        'flux_kontext_output.png'
-      );
-      document.getElementById('btnFluxUseAsImg2')?.addEventListener('click', sendFluxResultToStep2);
-    }
-
-    // Config controls
-    document.getElementById('cfgModelId')?.addEventListener('change', (e) => {
-      state.flux.config.model_id = /** @type {HTMLSelectElement} */ (e.target).value;
-      renderSidebar();
-    });
-    document.getElementById('cfgDevice')?.addEventListener('change', (e) => {
-      state.flux.config.device = /** @type {HTMLSelectElement} */ (e.target).value;
-    });
-    document.getElementById('cfgOutSizeMode')?.addEventListener('change', (e) => {
-      state.flux.config.output_size_mode = /** @type {HTMLSelectElement} */ (e.target).value;
-    });
-    document.getElementById('cfgUse8Bit')?.addEventListener('change', (e) => {
-      state.flux.config.use_8bit_quantization = /** @type {HTMLInputElement} */ (e.target).checked;
-      renderSidebar();
-    });
-    document.getElementById('cfgQuantMode')?.addEventListener('change', (e) => {
-      state.flux.config.quantization_mode = /** @type {HTMLSelectElement} */ (e.target).value;
-      renderSidebar();
-    });
-
-    const rngStr = /** @type {HTMLInputElement | null} */ (document.getElementById('rngCfgStrength'));
-    const numStr = /** @type {HTMLInputElement | null} */ (document.getElementById('numCfgStrength'));
-    const valStr = document.getElementById('valCfgStrength');
-    rngStr?.addEventListener('input', () => {
-      const v = Number(rngStr.value);
-      state.flux.config.strength = v;
-      if (numStr) numStr.value = String(v);
-      if (valStr) valStr.textContent = v.toFixed(2);
-    });
-    numStr?.addEventListener('change', () => {
-      const v = Math.max(0, Math.min(1, Number(numStr.value) || 0));
-      state.flux.config.strength = v;
-      if (rngStr) rngStr.value = String(v);
-      if (valStr) valStr.textContent = v.toFixed(2);
-    });
-
-    document.getElementById('cfgSteps')?.addEventListener('change', (e) => {
-      const raw = /** @type {HTMLInputElement} */ (e.target).value.trim();
-      state.flux.config.num_inference_steps = raw === '' ? null : Math.max(1, parseInt(raw, 10));
-    });
-    document.getElementById('cfgGuidance')?.addEventListener('change', (e) => {
-      const raw = /** @type {HTMLInputElement} */ (e.target).value.trim();
-      state.flux.config.guidance_scale = raw === '' ? null : Math.max(0, parseFloat(raw));
-    });
-    document.getElementById('cfgSeed')?.addEventListener('change', (e) => {
-      const raw = /** @type {HTMLInputElement} */ (e.target).value.trim();
-      state.flux.config.seed = raw === '' ? null : parseInt(raw, 10);
-    });
-    document.getElementById('cfgMegapixels')?.addEventListener('change', (e) => {
-      const v = parseFloat(/** @type {HTMLInputElement} */ (e.target).value);
-      state.flux.config.target_megapixels = Number.isFinite(v) ? Math.max(0.25, v) : 1.0;
-    });
-    document.getElementById('cfgGapPx')?.addEventListener('change', (e) => {
-      const v = parseInt(/** @type {HTMLInputElement} */ (e.target).value, 10);
-      state.flux.config.collage_gap_px = Number.isFinite(v) ? Math.max(0, v) : 4;
-      recomputeFluxCollage();
-      syncViewportScene();
-    });
-    document.getElementById('cfgBgColor')?.addEventListener('change', (e) => {
-      state.flux.config.collage_bg_color =
-        /** @type {HTMLInputElement} */ (e.target).value.trim() || '#000000';
-      recomputeFluxCollage();
-      syncViewportScene();
-    });
-    document.getElementById('cfgImagePath')?.addEventListener('change', (e) => {
-      state.flux.config.image_path = /** @type {HTMLInputElement} */ (e.target).value;
-    });
-    document.getElementById('cfgOutputPath')?.addEventListener('change', (e) => {
-      state.flux.config.output_path = /** @type {HTMLInputElement} */ (e.target).value;
-    });
-    document.getElementById('cfgPromptFile')?.addEventListener('change', (e) => {
-      const v = /** @type {HTMLInputElement} */ (e.target).value.trim();
-      state.flux.config.prompt_file = v === '' ? null : v;
-    });
-
-    document.getElementById('btnSaveFluxConfig')?.addEventListener('click', saveFluxConfigToDisk);
-    document.getElementById('btnReloadFluxConfig')?.addEventListener('click', () => {
-      refreshFluxBackendState(true);
-      showToast('Configurações recarregadas de config.py.');
-    });
-
-    // Bottom generate & collage export controls
-    document.getElementById('btnFluxGenerate')?.addEventListener('click', runFluxGeneration);
-    document.getElementById('chkFluxAutoStep2')?.addEventListener('change', (e) => {
-      state.flux.autoSendToStep2 = /** @type {HTMLInputElement} */ (e.target).checked;
-    });
-    document.getElementById('btnFluxDlCollage')?.addEventListener('click', async () => {
-      if (!state.fluxCollageCanvas) return;
-      const res = await Ops.saveCanvasToData(
-        state.fluxCollageCanvas,
-        'flux_collage_input.png',
-        state.targetDataFolder
-      );
-      if (res.viaApi && isRemoteClient()) {
-        Ops.downloadCanvasAsPng(state.fluxCollageCanvas, 'flux_collage_input.png');
-        showToast(`Colagem salva em /${res.path} e baixada no dispositivo!`);
-      } else {
-        showToast(
-          res.viaApi
-            ? `Colagem salva em /${res.path}!`
-            : 'Download da colagem concluído.'
-        );
+    const commit = () => {
+      const normalized = inputEl.value.replace(/,/g, '.').trim();
+      let parsed = Number(normalized);
+      if (normalized === '' || normalized === '-' || normalized === '.' || !Number.isFinite(parsed)) {
+        parsed = opts.fallback !== undefined ? opts.fallback : Number(valueOnFocus) || 0;
       }
-    });
-    document.getElementById('btnFluxUnloadVram')?.addEventListener('click', async () => {
-      try {
-        await fluxApiFetch('/api/flux/unload', { method: 'POST' });
-        await refreshFluxBackendState(false);
-        showToast('VRAM liberada com sucesso!');
-      } catch (err) {
-        showToast(err.message || 'Erro ao liberar VRAM.', true);
+      const clamped = Math.max(opts.min, Math.min(opts.max, parsed));
+      inputEl.value = formatNum(clamped);
+      opts.onValid(clamped);
+      if (opts.onCommit) opts.onCommit(clamped);
+    };
+
+    inputEl.addEventListener('blur', commit);
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        inputEl.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        inputEl.value = valueOnFocus;
+        inputEl.blur();
       }
     });
   }
@@ -2876,7 +2239,7 @@
           </div>
           <div class="slider-line">
             <input type="range" id="rngImg2Scale" min="20" max="300" step="0.5" value="${state.img2Transform.scale * 100}" ${!state.img2 ? 'disabled' : ''} />
-            <input type="number" class="num-input" id="numImg2Scale" step="1" value="${Math.round(state.img2Transform.scale * 100)}" ${!state.img2 ? 'disabled' : ''} />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" id="numImg2Scale" value="${Math.round(state.img2Transform.scale * 100)}" ${!state.img2 ? 'disabled' : ''} />
           </div>
         </div>
 
@@ -2887,7 +2250,7 @@
           </div>
           <div class="slider-line">
             <input type="range" id="rngImg2Rot" min="-180" max="180" step="0.5" value="${state.img2Transform.rotation || 0}" ${!state.img2 ? 'disabled' : ''} />
-            <input type="number" class="num-input" style="width:48px" id="numImg2Rot" step="0.5" value="${(state.img2Transform.rotation || 0).toFixed(1)}" ${!state.img2 ? 'disabled' : ''} />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" style="width:54px" id="numImg2Rot" value="${(state.img2Transform.rotation || 0).toFixed(1)}" ${!state.img2 ? 'disabled' : ''} />
             <button class="btn btn-xs" id="btnRotNudgeLeft" ${!state.img2 ? 'disabled' : ''} title="Girar -1°">↶-1°</button>
             <button class="btn btn-xs" id="btnRotReset" ${!state.img2 ? 'disabled' : ''} title="Zerar Rotação">↺0°</button>
             <button class="btn btn-xs" id="btnRotNudgeRight" ${!state.img2 ? 'disabled' : ''} title="Girar +1°">↷+1°</button>
@@ -2900,8 +2263,8 @@
             <span class="control-val" id="valImg2XY">0, 0</span>
           </div>
           <div class="slider-line">
-            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numImg2X" step="1" value="${Math.round(state.img2Transform.x)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento X" />
-            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numImg2Y" step="1" value="${Math.round(state.img2Transform.y)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento Y" />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" style="flex:1" id="numImg2X" value="${Math.round(state.img2Transform.x)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento X" />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" style="flex:1" id="numImg2Y" value="${Math.round(state.img2Transform.y)}" ${!state.img2 ? 'disabled' : ''} title="Deslocamento Y" />
             <button class="btn btn-xs" id="btnImg2ResetContain" ${!state.img2 ? 'disabled' : ''} title="Centralizar">🎯 Centralizar</button>
             <button class="btn btn-xs" id="btnImg2Cover" ${!state.img2 ? 'disabled' : ''} title="Preencher">⛶ Preencher</button>
           </div>
@@ -2977,37 +2340,77 @@
     rngScale?.addEventListener('input', () => {
       state.step2View = 'align';
       state.img2Transform.scale = Math.max(0.1, Number(rngScale.value) / 100);
-      recomputeStep2Outputs();
-      syncViewportScene();
       updateSidebarLiveValues();
+      scheduleLiveRecompute(() => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+      });
     });
-    rngScale?.addEventListener('change', () => updateSidebarThumbnails());
-
-    numScale?.addEventListener('change', () => {
-      state.step2View = 'align';
-      state.img2Transform.scale = Math.max(0.1, Math.min(8, (Number(numScale.value) || 100) / 100));
+    rngScale?.addEventListener('change', () => {
       recomputeStep2Outputs();
       syncViewportScene();
-      updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
+    });
+
+    bindNumericInput(numScale, {
+      min: 10,
+      max: 800,
+      decimals: 0,
+      fallback: 100,
+      onValid: (val) => {
+        state.step2View = 'align';
+        state.img2Transform.scale = val / 100;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep2Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
     });
 
     rngRot?.addEventListener('input', () => {
       state.step2View = 'align';
       state.img2Transform.rotation = Number(rngRot.value) || 0;
-      recomputeStep2Outputs();
-      syncViewportScene();
       updateSidebarLiveValues();
+      scheduleLiveRecompute(() => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+      });
     });
-    rngRot?.addEventListener('change', () => updateSidebarThumbnails());
-
-    numRot?.addEventListener('change', () => {
-      state.step2View = 'align';
-      state.img2Transform.rotation = Number(numRot.value) || 0;
+    rngRot?.addEventListener('change', () => {
       recomputeStep2Outputs();
       syncViewportScene();
-      updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
+    });
+
+    bindNumericInput(numRot, {
+      min: -180,
+      max: 180,
+      decimals: 1,
+      fallback: 0,
+      onValid: (val) => {
+        state.step2View = 'align';
+        state.img2Transform.rotation = val;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep2Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
     });
 
     document.getElementById('btnRotNudgeLeft')?.addEventListener('click', () => {
@@ -3018,6 +2421,7 @@
       syncViewportScene();
       updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
     });
 
     document.getElementById('btnRotReset')?.addEventListener('click', () => {
@@ -3027,6 +2431,7 @@
       syncViewportScene();
       updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
     });
 
     document.getElementById('btnRotNudgeRight')?.addEventListener('click', () => {
@@ -3037,19 +2442,51 @@
       syncViewportScene();
       updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
     });
 
-    const onXYChange = () => {
-      state.step2View = 'align';
-      state.img2Transform.x = Number(numX?.value) || 0;
-      state.img2Transform.y = Number(numY?.value) || 0;
-      recomputeStep2Outputs();
-      syncViewportScene();
-      updateSidebarLiveValues();
-      updateSidebarThumbnails();
-    };
-    numX?.addEventListener('input', onXYChange);
-    numY?.addEventListener('input', onXYChange);
+    bindNumericInput(numX, {
+      min: -5000,
+      max: 5000,
+      decimals: 0,
+      fallback: 0,
+      onValid: (val) => {
+        state.step2View = 'align';
+        state.img2Transform.x = val;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep2Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
+    });
+    bindNumericInput(numY, {
+      min: -5000,
+      max: 5000,
+      decimals: 0,
+      fallback: 0,
+      onValid: (val) => {
+        state.step2View = 'align';
+        state.img2Transform.y = val;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep2Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep2Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
+    });
 
     const nudgeImg2 = (dx, dy) => {
       state.step2View = 'align';
@@ -3096,6 +2533,7 @@
 
     document.getElementById('sbNextTo3')?.addEventListener('click', () => {
       state.activeStep = 3;
+      ensureStepComputed(3);
       syncAllUI();
     });
   }
@@ -3140,7 +2578,7 @@
             </div>
             <div class="slider-line">
               <input type="range" id="rngExpandPx" min="-20" max="${maxExpand}" step="1" value="${state.expandPx}" ${!state.imgMergeCanvas ? 'disabled' : ''} />
-              <input type="number" class="num-input" id="numExpandPx" min="-50" max="${maxExpand}" value="${state.expandPx}" ${!state.imgMergeCanvas ? 'disabled' : ''} />
+              <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" id="numExpandPx" value="${state.expandPx}" ${!state.imgMergeCanvas ? 'disabled' : ''} />
             </div>
           </div>
         `
@@ -3225,18 +2663,38 @@
 
     rngExpand?.addEventListener('input', () => {
       state.expandPx = Number(rngExpand.value) || 0;
-      recomputeStep3Outputs(false);
-      syncViewportScene();
       updateSidebarLiveValues();
+      scheduleLiveRecompute(() => {
+        recomputeStep3Outputs(false);
+        syncViewportScene();
+      });
     });
-    rngExpand?.addEventListener('change', () => updateSidebarThumbnails());
-
-    numExpand?.addEventListener('change', () => {
-      state.expandPx = Number(numExpand.value) || 0;
+    rngExpand?.addEventListener('change', () => {
       recomputeStep3Outputs(false);
       syncViewportScene();
-      updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
+    });
+
+    bindNumericInput(numExpand, {
+      min: -50,
+      max: maxExpand,
+      decimals: 0,
+      fallback: state.expandPx,
+      onValid: (val) => {
+        state.expandPx = Math.round(val);
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep3Outputs(false);
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep3Outputs(false);
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
     });
 
     document.getElementById('btnFlipCustom2')?.addEventListener('click', flipCustomMergeRole);
@@ -3283,6 +2741,7 @@
 
     document.getElementById('sbNextTo4')?.addEventListener('click', () => {
       state.activeStep = 4;
+      ensureStepComputed(4);
       syncAllUI();
     });
   }
@@ -3323,7 +2782,7 @@
           </div>
           <div class="slider-line">
             <input type="range" id="rngRefScale" min="20" max="300" step="0.5" value="${state.refinedTransform.scale * 100}" ${!state.imgRefined ? 'disabled' : ''} />
-            <input type="number" class="num-input" id="numRefScale" step="1" value="${Math.round(state.refinedTransform.scale * 100)}" ${!state.imgRefined ? 'disabled' : ''} />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" id="numRefScale" value="${Math.round(state.refinedTransform.scale * 100)}" ${!state.imgRefined ? 'disabled' : ''} />
           </div>
         </div>
 
@@ -3333,8 +2792,8 @@
             <span class="control-val" id="valRefXY">0, 0</span>
           </div>
           <div class="slider-line">
-            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numRefX" step="1" value="${Math.round(state.refinedTransform.x)}" ${!state.imgRefined ? 'disabled' : ''} />
-            <input type="number" inputmode="decimal" class="num-input" style="flex:1" id="numRefY" step="1" value="${Math.round(state.refinedTransform.y)}" ${!state.imgRefined ? 'disabled' : ''} />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" style="flex:1" id="numRefX" value="${Math.round(state.refinedTransform.x)}" ${!state.imgRefined ? 'disabled' : ''} />
+            <input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="num-input" style="flex:1" id="numRefY" value="${Math.round(state.refinedTransform.y)}" ${!state.imgRefined ? 'disabled' : ''} />
           </div>
           <div class="nudge-row">
             <button class="btn btn-xs" id="btnRefNudgeL" ${!state.imgRefined ? 'disabled' : ''} title="Mover 2px para esquerda">←</button>
@@ -3422,32 +2881,83 @@
     rngScale?.addEventListener('input', () => {
       state.step4View = 'align';
       state.refinedTransform.scale = Math.max(0.1, Number(rngScale.value) / 100);
-      recomputeStep4Outputs();
-      syncViewportScene();
       updateSidebarLiveValues();
+      scheduleLiveRecompute(() => {
+        recomputeStep4Outputs();
+        syncViewportScene();
+      });
     });
-    rngScale?.addEventListener('change', () => updateSidebarThumbnails());
-
-    numScale?.addEventListener('change', () => {
-      state.step4View = 'align';
-      state.refinedTransform.scale = Math.max(0.1, Math.min(8, (Number(numScale.value) || 100) / 100));
+    rngScale?.addEventListener('change', () => {
       recomputeStep4Outputs();
       syncViewportScene();
-      updateSidebarLiveValues();
       updateSidebarThumbnails();
+      scheduleAutoSaveProject();
     });
 
-    const onRefXY = () => {
-      state.step4View = 'align';
-      state.refinedTransform.x = Number(numX?.value) || 0;
-      state.refinedTransform.y = Number(numY?.value) || 0;
-      recomputeStep4Outputs();
-      syncViewportScene();
-      updateSidebarLiveValues();
-      updateSidebarThumbnails();
-    };
-    numX?.addEventListener('input', onRefXY);
-    numY?.addEventListener('input', onRefXY);
+    bindNumericInput(numScale, {
+      min: 10,
+      max: 800,
+      decimals: 0,
+      fallback: 100,
+      onValid: (val) => {
+        state.step4View = 'align';
+        state.refinedTransform.scale = val / 100;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep4Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep4Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
+    });
+
+    bindNumericInput(numX, {
+      min: -5000,
+      max: 5000,
+      decimals: 0,
+      fallback: 0,
+      onValid: (val) => {
+        state.step4View = 'align';
+        state.refinedTransform.x = val;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep4Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep4Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
+    });
+    bindNumericInput(numY, {
+      min: -5000,
+      max: 5000,
+      decimals: 0,
+      fallback: 0,
+      onValid: (val) => {
+        state.step4View = 'align';
+        state.refinedTransform.y = val;
+        updateSidebarLiveValues();
+        scheduleLiveRecompute(() => {
+          recomputeStep4Outputs();
+          syncViewportScene();
+        });
+      },
+      onCommit: () => {
+        recomputeStep4Outputs();
+        syncViewportScene();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
+      },
+    });
 
     const nudgeRef = (dx, dy) => {
       state.step4View = 'align';
@@ -3495,6 +3005,7 @@
 
     document.getElementById('sbNextTo5')?.addEventListener('click', () => {
       state.activeStep = 5;
+      ensureStepComputed(5);
       syncAllUI();
     });
   }
@@ -3655,6 +3166,7 @@
 
     document.getElementById('sbNextTo6')?.addEventListener('click', () => {
       state.activeStep = 6;
+      ensureStepComputed(6);
       syncAllUI();
     });
 
@@ -3670,6 +3182,7 @@
         }
         recomputeStep5Outputs();
         syncAllUI();
+        scheduleAutoSaveProject();
       });
     });
 
@@ -3864,11 +3377,24 @@
 
         <div class="control-row">
           <div class="control-label">
-            <span>Polimento Local na Costura</span>
+            <span>Harmonia de Pele na Borda (Sem Degrau)</span>
+            <span class="control-val" id="valSkinBorderStr">${Math.round((sp.borderMatchStrength ?? 0.9) * 100)}%</span>
+          </div>
+          <input type="range" id="rngSkinBorderStr" min="0" max="100" step="1" value="${Math.round((sp.borderMatchStrength ?? 0.9) * 100)}" ${disabledAttr} />
+        </div>
+
+        <div class="control-row">
+          <div class="control-label">
+            <span>Alcance da Transição de Borda</span>
             <span class="control-val" id="valSkinSeamPx">${sp.seamEqualizePx} px</span>
           </div>
-          <input type="range" id="rngSkinSeamPx" min="0" max="50" step="1" value="${sp.seamEqualizePx}" ${disabledAttr} />
+          <input type="range" id="rngSkinSeamPx" min="0" max="90" step="1" value="${sp.seamEqualizePx}" ${disabledAttr} />
         </div>
+
+        <label class="checkbox-row" style="margin-top:2px">
+          <input type="checkbox" id="chkSkinBorderMutual" ${sp.borderMutualMeet !== false ? 'checked' : ''} ${disabledAttr} />
+          <span>Convergência Mútua nas Bordas (Rosto ↔ Corpo)</span>
+        </label>
 
         <label class="checkbox-row" style="margin-top:2px">
           <input type="checkbox" id="chkSkinProtect" ${sp.protectFeatures ? 'checked' : ''} ${disabledAttr} />
@@ -4089,8 +3615,21 @@
       bindStep6Range('rngSkinChroma', (v) => {
         state.skinPost.chromaMatch = v / 100;
       });
+      bindStep6Range('rngSkinBorderStr', (v) => {
+        state.skinPost.borderMatchStrength = v / 100;
+      });
       bindStep6Range('rngSkinSeamPx', (v) => {
         state.skinPost.seamEqualizePx = Math.round(v);
+      });
+
+      const chkMutual = /** @type {HTMLInputElement | null} */ (document.getElementById('chkSkinBorderMutual'));
+      chkMutual?.addEventListener('change', () => {
+        state.skinPost.borderMutualMeet = chkMutual.checked;
+        recomputeStep6Outputs();
+        syncViewportScene();
+        updateSidebarLiveValues();
+        updateSidebarThumbnails();
+        scheduleAutoSaveProject();
       });
 
       const chkProt = /** @type {HTMLInputElement | null} */ (document.getElementById('chkSkinProtect'));
@@ -4100,6 +3639,7 @@
         syncViewportScene();
         updateSidebarLiveValues();
         updateSidebarThumbnails();
+        scheduleAutoSaveProject();
       });
     } else if (state.step6Subtab === 'fine') {
       bindStep6Range('rngSkinTemp', (v) => {
@@ -4235,6 +3775,7 @@
       setTxt('valSkinLuma', `${Math.round(sp.lumaMatch * 100)}%`);
       setTxt('valSkinChroma', `${Math.round(sp.chromaMatch * 100)}%`);
       setTxt('valSkinSelectivity', `${Math.round(sp.maskSelectivity * 100)}%`);
+      setTxt('valSkinBorderStr', `${Math.round((sp.borderMatchStrength ?? 0.9) * 100)}%`);
       setTxt('valSkinSeamPx', `${sp.seamEqualizePx} px`);
       setTxt('valSkinTemp', `${sp.tempOffset > 0 ? '+' : ''}${sp.tempOffset}`);
       setTxt('valSkinTint', `${sp.tintOffset > 0 ? '+' : ''}${sp.tintOffset}`);
@@ -4264,11 +3805,7 @@
   }
 
   function updateSidebarThumbnails() {
-    if (state.activeStep === 'flux') {
-      mountThumb(document.getElementById('thumbFluxLeft'), state.fluxLeftPanelCanvas);
-      mountThumb(document.getElementById('thumbFluxCollage'), state.fluxCollageCanvas);
-      mountThumb(document.getElementById('thumbFluxResult'), state.fluxResultCanvas);
-    } else if (state.activeStep === 1) {
+    if (state.activeStep === 1) {
       mountThumb(document.getElementById('thumbCorpo1'), state.corpo1Canvas);
       mountThumb(document.getElementById('thumbFace1'), state.face1Canvas);
     } else if (state.activeStep === 2) {
@@ -4294,23 +3831,43 @@
    */
   function bindCopyDownload(copyId, dlId, getCanvas, filename) {
     document.getElementById(copyId)?.addEventListener('click', () => {
+      ensureStepComputed(state.activeStep);
       const c = getCanvas();
       if (c) copyWithToast(c, `${filename} copiado para a área de transferência!`, filename);
     });
     document.getElementById(dlId)?.addEventListener('click', async () => {
+      ensureStepComputed(state.activeStep);
       const c = getCanvas();
-      if (c) {
-        const res = await Ops.saveCanvasToData(c, filename, state.targetDataFolder);
-        if (res.viaApi) {
-          if (isRemoteClient()) {
-            Ops.downloadCanvasAsPng(c, filename);
-            showToast(`Salvo em /${res.path} e baixado no dispositivo!`);
-          } else {
-            showToast(`Salvo com sucesso em /${res.path}!`);
-          }
-        } else {
-          showToast(`Download de ${filename} concluído (salvar em /data/${state.targetDataFolder || ''})`);
+      if (!c) return;
+
+      if (Ops.isIOSDevice()) {
+        // Trigger native iOS Share Sheet synchronously within click gesture (no extra tab opened!)
+        const sharePromise = Ops.shareOrDownloadCanvas(c, filename);
+        const isLocalLan =
+          window.location.protocol === 'http:' &&
+          (!isRemoteClient() || /^\d+\.\d+\.\d+\.\d+$/.test(window.location.hostname));
+        if (isLocalLan) {
+          Ops.saveCanvasToData(c, filename, state.targetDataFolder).catch(() => {});
         }
+        const action = await sharePromise;
+        if (action === 'shared') {
+          showToast("Toque em 'Salvar Imagem' para guardar direto na Fototeca.");
+        } else if (action === 'downloaded') {
+          showToast(`Download de ${filename} concluído.`);
+        }
+        return;
+      }
+
+      const res = await Ops.saveCanvasToData(c, filename, state.targetDataFolder);
+      if (res.viaApi) {
+        if (isRemoteClient()) {
+          await Ops.shareOrDownloadCanvas(c, filename);
+          showToast(`Salvo em /${res.path} e baixado no dispositivo!`);
+        } else {
+          showToast(`Salvo com sucesso em /${res.path}!`);
+        }
+      } else {
+        showToast(`Download de ${filename} concluído.`);
       }
     });
   }
@@ -5041,6 +4598,714 @@
     });
   }
 
+  // ===========================================================================
+  // Themes, Settings & Disk-Persisted History (IndexedDB)
+  // ===========================================================================
+
+  /** @type {string[]} */
+  let historyObjectUrls = [];
+  function revokeHistoryObjectUrls() {
+    while (historyObjectUrls.length > 0) {
+      const u = historyObjectUrls.pop();
+      if (u) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch (_) {}
+      }
+    }
+  }
+
+  function applyTheme(themeId, persist = false) {
+    const chosen = THEMES.find((t) => t.id === themeId) || THEMES[0];
+    state.appSettings.theme = chosen.id;
+    document.documentElement.setAttribute('data-theme', chosen.id);
+    if (metaThemeColor) {
+      metaThemeColor.setAttribute('content', chosen.themeColor);
+    }
+    try {
+      localStorage.setItem('sm_theme', chosen.id);
+    } catch (_) {}
+    viewport._gridPattern = null;
+    viewport.requestRender();
+    if (persist && Storage) {
+      Storage.saveSettings(state.appSettings).catch(() => {});
+    }
+  }
+
+  function setActiveView(view) {
+    state.activeView = view;
+    if (workspaceStudio) workspaceStudio.hidden = view !== 'studio';
+    if (viewHistory) viewHistory.hidden = view !== 'history';
+    if (viewSettings) viewSettings.hidden = view !== 'settings';
+
+    btnViewStudio?.classList.toggle('active', view === 'studio');
+    btnViewHistory?.classList.toggle('active', view === 'history');
+    btnViewSettings?.classList.toggle('active', view === 'settings');
+
+    if (view !== 'history') {
+      revokeHistoryObjectUrls();
+    }
+    if (view === 'history') {
+      renderHistoryView();
+    } else if (view === 'settings') {
+      renderSettingsView();
+    } else {
+      requestAnimationFrame(() => {
+        viewport._syncCanvasSize();
+        viewport.requestRender();
+      });
+    }
+  }
+
+  /**
+   * Encodes a LoadedImage into a cached PNG blob without retaining temp canvases in RAM.
+   * @param {LoadedImage & { _cachedBlob?: Blob }} loaded
+   * @returns {Promise<Blob | null>}
+   */
+  async function loadedToBlobCached(loaded) {
+    if (!loaded || !loaded.img) return null;
+    if (loaded._cachedBlob) return loaded._cachedBlob;
+    if (!Storage) return null;
+    const tmp = Ops.sourceToCanvas(loaded.img);
+    const blob = await Storage.canvasToBlob(tmp, 'image/png');
+    if (tmp !== loaded.img) {
+      Ops.releaseCanvas(tmp);
+    }
+    if (blob) loaded._cachedBlob = blob;
+    return blob;
+  }
+
+  /**
+   * Encodes binary mask Uint8Array to a tiny lossless grayscale PNG blob.
+   * @param {Uint8Array} mask
+   * @param {number} w
+   * @param {number} h
+   */
+  async function maskToPngBlob(mask, w, h) {
+    if (!Storage || !mask) return null;
+    const c = Ops.createCanvas(w, h);
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    const imgData = ctx.createImageData(w, h);
+    const d = imgData.data;
+    for (let i = 0; i < mask.length; i++) {
+      const v = mask[i] ? 255 : 0;
+      const p4 = i * 4;
+      d[p4] = v;
+      d[p4 + 1] = v;
+      d[p4 + 2] = v;
+      d[p4 + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    const blob = await Storage.canvasToBlob(c, 'image/png');
+    Ops.releaseCanvas(c);
+    return blob;
+  }
+
+  let _autoSaveTimer = 0;
+  function scheduleAutoSaveProject() {
+    if (!state.appSettings.autoSaveHistory || !state.img1Canvas || !Storage) return;
+    clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = window.setTimeout(() => {
+      saveCurrentProjectToDisk(true).catch(() => {});
+    }, 1800);
+  }
+
+  async function saveCurrentProjectToDisk(silent = true) {
+    if (!Storage || !state.img1Canvas || !state.img1) {
+      if (!silent) showToast('Importe pelo menos a imagem1 antes de salvar no histórico.', true);
+      return false;
+    }
+    try {
+      const isCompleted = !!(
+        state.imgPostCanvas ||
+        state.imgFinalCanvas ||
+        (state.imgRefined && state.faceMask1)
+      );
+      const status = isCompleted ? 'completed' : 'in_progress';
+
+      const thumbSrc =
+        state.imgPostCanvas ||
+        state.imgFinalCanvas ||
+        state.imgMergeCanvas ||
+        state.face1Canvas ||
+        state.img1Canvas;
+      const thumbBlob = await Storage.createThumbnailBlob(thumbSrc, 320);
+
+      const img1Blob = await Storage.canvasToBlob(state.img1Canvas, 'image/png');
+      const img2Blob = state.img2 ? await loadedToBlobCached(state.img2) : null;
+      const imgRefinedBlob = state.imgRefined ? await loadedToBlobCached(state.imgRefined) : null;
+      const finalTarget = state.imgPostCanvas || state.imgFinalCanvas;
+      const finalBlob = finalTarget ? await Storage.canvasToBlob(finalTarget, 'image/png') : null;
+      const mask1Blob =
+        state.selection1 && state.selection1.type === 'auto-face' && state.rawMask1
+          ? await maskToPngBlob(state.rawMask1, state.img1Canvas.width, state.img1Canvas.height)
+          : null;
+
+      const metaRecord = {
+        id: state.currentProjectId,
+        name:
+          state.currentProjectName ||
+          (state.img1.name ? state.img1.name.replace(/\.[^.]+$/, '') : 'Projeto sem título'),
+        status,
+        activeStep: state.activeStep,
+        createdAt: state.currentProjectCreatedAt || Date.now(),
+        updatedAt: Date.now(),
+        width: state.img1Canvas.width,
+        height: state.img1Canvas.height,
+        thumbBlob,
+        meta: {
+          version: 1,
+          selection1: state.selection1,
+          faceIsOne1: state.faceIsOne1,
+          img2Transform: { ...state.img2Transform },
+          img2OnionOpacity: state.img2OnionOpacity,
+          mergeRegionMode: state.mergeRegionMode,
+          expandPx: state.expandPx,
+          customSelection2: state.customSelection2,
+          customFaceIsOne2: state.customFaceIsOne2,
+          customExtraExpandPx: state.customExtraExpandPx,
+          exportCroppedMode: state.exportCroppedMode,
+          refinedTargetMode: state.refinedTargetMode,
+          refinedTransform: { ...state.refinedTransform },
+          refinedOnionOpacity: state.refinedOnionOpacity,
+          finalMerge: { ...state.finalMerge },
+          skinPost: { ...state.skinPost },
+          skinSamplesFace: state.skinSamplesFace.slice(),
+          skinSamplesBody: state.skinSamplesBody.slice(),
+          img1Name: state.img1.name || 'imagem1.png',
+          img2Name: state.img2 ? state.img2.name : '',
+          refinedName: state.imgRefined ? state.imgRefined.name : '',
+        },
+      };
+
+      const blobsRecord = {
+        id: state.currentProjectId,
+        img1Blob,
+        img2Blob,
+        imgRefinedBlob,
+        finalBlob,
+        mask1Blob,
+      };
+
+      await Storage.saveProject(metaRecord, blobsRecord);
+      if (!silent) showToast('Projeto salvo no histórico em disco!');
+      return true;
+    } catch (err) {
+      if (!silent) showToast((err && err.message) || 'Erro ao salvar projeto no disco.', true);
+      return false;
+    }
+  }
+
+  async function openStoredProject(id) {
+    if (!Storage) return;
+    try {
+      const rec = await Storage.loadProject(id);
+      if (!rec || !rec.metaRecord || !rec.blobsRecord || !rec.blobsRecord.img1Blob) {
+        showToast('Não foi possível localizar os arquivos deste projeto.', true);
+        return;
+      }
+      const { metaRecord, blobsRecord } = rec;
+      const m = metaRecord.meta || {};
+
+      clearActiveProjectMemory();
+
+      state.currentProjectId = metaRecord.id;
+      state.currentProjectName = metaRecord.name || 'Projeto';
+      state.currentProjectCreatedAt = metaRecord.createdAt || Date.now();
+
+      const img1Loaded = await Ops.loadImageFromBlob(blobsRecord.img1Blob, m.img1Name || 'imagem1.png');
+      img1Loaded._cachedBlob = blobsRecord.img1Blob;
+      state.img1 = img1Loaded;
+      setStateCanvas('img1Canvas', Ops.sourceToCanvas(img1Loaded.img));
+
+      const W = state.img1Canvas.width;
+      const H = state.img1Canvas.height;
+
+      state.selection1 = m.selection1 || null;
+      state.faceIsOne1 = m.faceIsOne1 !== undefined ? !!m.faceIsOne1 : true;
+      if (state.selection1 && state.selection1.polygon && state.selection1.polygon.length >= 3) {
+        state.rawMask1 = Geo.rasterizePolygonMask(state.selection1.polygon, W, H);
+      } else if (blobsRecord.mask1Blob) {
+        const maskImg = await Ops.loadImageFromBlob(blobsRecord.mask1Blob, 'mask.png');
+        const mc = Ops.sourceToCanvas(maskImg.img);
+        const mctx = mc.getContext('2d', { willReadFrequently: true });
+        if (mctx) {
+          const md = mctx.getImageData(0, 0, W, H).data;
+          const arr = new Uint8Array(W * H);
+          for (let i = 0; i < arr.length; i++) arr[i] = md[i * 4] >= 128 ? 1 : 0;
+          state.rawMask1 = arr;
+        }
+        Ops.releaseCanvas(mc);
+      } else {
+        state.rawMask1 = null;
+      }
+
+      if (blobsRecord.img2Blob) {
+        const img2Loaded = await Ops.loadImageFromBlob(blobsRecord.img2Blob, m.img2Name || 'imagem2.png');
+        img2Loaded._cachedBlob = blobsRecord.img2Blob;
+        state.img2 = img2Loaded;
+      }
+      state.img2Transform = m.img2Transform ? { ...m.img2Transform } : { x: 0, y: 0, scale: 1, rotation: 0 };
+      state.img2OnionOpacity = m.img2OnionOpacity ?? 0.35;
+      state.mergeRegionMode = m.mergeRegionMode || 'expand';
+      state.expandPx = m.expandPx ?? 36;
+      state.customSelection2 = m.customSelection2 || null;
+      state.customFaceIsOne2 = m.customFaceIsOne2 !== undefined ? !!m.customFaceIsOne2 : true;
+      state.customExtraExpandPx = m.customExtraExpandPx ?? 0;
+
+      if (state.customSelection2 && state.customSelection2.polygon && state.customSelection2.polygon.length >= 3) {
+        state.customRawMask2 = Geo.rasterizePolygonMask(state.customSelection2.polygon, W, H);
+        const normC = new Uint8Array(W * H);
+        const want = state.customFaceIsOne2 ? 1 : 0;
+        for (let i = 0; i < normC.length; i++) normC[i] = state.customRawMask2[i] === want ? 1 : 0;
+        state.edtCustomOutSq = Geo.computeEDT2DSq(normC, 1, W, H);
+        state.edtCustomInSq = Geo.computeEDT2DSq(normC, 0, W, H);
+      }
+
+      state.exportCroppedMode = !!m.exportCroppedMode;
+      state.refinedTargetMode = m.refinedTargetMode || 'full';
+      state.refinedTransform = m.refinedTransform ? { ...m.refinedTransform } : { x: 0, y: 0, scale: 1 };
+      state.refinedOnionOpacity = m.refinedOnionOpacity ?? 0.32;
+
+      if (blobsRecord.imgRefinedBlob) {
+        const refLoaded = await Ops.loadImageFromBlob(
+          blobsRecord.imgRefinedBlob,
+          m.refinedName || 'refinada.png'
+        );
+        refLoaded._cachedBlob = blobsRecord.imgRefinedBlob;
+        state.imgRefined = refLoaded;
+      }
+
+      if (m.finalMerge) state.finalMerge = { ...state.finalMerge, ...m.finalMerge };
+      if (m.skinPost) state.skinPost = { ...state.skinPost, ...m.skinPost };
+      state.skinSamplesFace = Array.isArray(m.skinSamplesFace) ? m.skinSamplesFace : [];
+      state.skinSamplesBody = Array.isArray(m.skinSamplesBody) ? m.skinSamplesBody : [];
+
+      const targetStep =
+        metaRecord.activeStep >= 1 && metaRecord.activeStep <= 6 ? metaRecord.activeStep : 1;
+      recomputeStep1Outputs(true);
+      ensureStepComputed(targetStep);
+
+      state.activeStep = targetStep;
+      viewport.setDocumentSize(W, H, true);
+      setActiveView('studio');
+      syncAllUI();
+      showToast(`Projeto "${state.currentProjectName}" reaberto do disco!`);
+    } catch (err) {
+      showToast((err && err.message) || 'Falha ao reabrir projeto.', true);
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes < 1024) return `${Math.round(bytes || 0)} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  async function renderHistoryView() {
+    if (!viewHistory) return;
+    revokeHistoryObjectUrls();
+    const allProjects = Storage ? await Storage.listProjects() : [];
+    const filtered = allProjects.filter((p) => {
+      if (state.historyFilter === 'all') return true;
+      return p.status === state.historyFilter;
+    });
+
+    const inProgCount = allProjects.filter((p) => p.status === 'in_progress').length;
+    const compCount = allProjects.filter((p) => p.status === 'completed').length;
+
+    const cardsHtml =
+      filtered.length === 0
+        ? `<div class="empty-state-box">
+            <div style="font-size:26px">🗂️</div>
+            <div style="font-weight:700;color:var(--text-main)">Nenhum projeto nesta categoria ainda</div>
+            <div style="font-size:12px;max-width:380px">Os projetos em andamento e finalizados são gravados automaticamente no disco (IndexedDB), sem consumir RAM nem cache volátil.</div>
+            <button class="btn btn-primary btn-sm" id="btnHistBackStudio">← Voltar ao Estúdio</button>
+          </div>`
+        : `<div class="history-grid">
+            ${filtered
+              .map((p) => {
+                let thumbUrl = '';
+                if (p.thumbBlob) {
+                  thumbUrl = URL.createObjectURL(p.thumbBlob);
+                  historyObjectUrls.push(thumbUrl);
+                }
+                const dateStr = new Date(p.updatedAt || p.createdAt || Date.now()).toLocaleString(
+                  'pt-BR',
+                  { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }
+                );
+                const isCur = p.id === state.currentProjectId && !!state.img1Canvas;
+                const badgeText = p.status === 'completed' ? '✓ Finalizado' : `Etapa ${p.activeStep || 1} • Em andamento`;
+                return `
+                  <article class="history-card ${isCur ? 'current' : ''}">
+                    <div class="history-thumb-wrap">
+                      ${thumbUrl ? `<img src="${thumbUrl}" alt="${escapeHtml(p.name)}" loading="lazy" />` : '<span style="color:var(--text-muted);font-size:11px">Sem miniatura</span>'}
+                      <span class="history-status-badge ${p.status}">${badgeText}</span>
+                    </div>
+                    <div class="history-card-body">
+                      <div class="history-card-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name || 'Projeto')}</div>
+                      <div class="history-card-meta">
+                        <span>${p.width || '?'}×${p.height || '?'} px</span>
+                        <span>${dateStr}</span>
+                      </div>
+                      <div class="history-card-actions">
+                        <button class="btn btn-primary btn-sm" style="flex:1.4" data-hist-open="${escapeHtml(p.id)}">📂 Abrir</button>
+                        <button class="btn btn-sm" data-hist-dl="${escapeHtml(p.id)}" title="Baixar / Salvar PNG">⬇</button>
+                        <button class="btn btn-sm btn-ghost" data-hist-ren="${escapeHtml(p.id)}" title="Renomear">✎</button>
+                        <button class="btn btn-sm btn-ghost" data-hist-del="${escapeHtml(p.id)}" title="Excluir do disco">🗑</button>
+                      </div>
+                    </div>
+                  </article>
+                `;
+              })
+              .join('')}
+          </div>`;
+
+    viewHistory.innerHTML = `
+      <div class="view-inner">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Histórico de Projetos</h1>
+            <p class="view-subtitle">Salvos diretamente no disco do dispositivo (IndexedDB) • zero consumo contínuo de RAM</p>
+          </div>
+          <div class="btn-row">
+            ${
+              state.img1Canvas
+                ? `<button class="btn btn-emerald btn-sm" id="btnHistSaveNow">💾 Salvar Projeto Atual</button>`
+                : ''
+            }
+            <button class="btn btn-sm" id="btnHistToStudio">🎨 Ir ao Estúdio</button>
+          </div>
+        </div>
+
+        <div class="filter-pills">
+          <button class="filter-pill ${state.historyFilter === 'all' ? 'active' : ''}" data-hist-filter="all">Todos (${allProjects.length})</button>
+          <button class="filter-pill ${state.historyFilter === 'in_progress' ? 'active' : ''}" data-hist-filter="in_progress">Em andamento (${inProgCount})</button>
+          <button class="filter-pill ${state.historyFilter === 'completed' ? 'active' : ''}" data-hist-filter="completed">Finalizados (${compCount})</button>
+        </div>
+
+        ${cardsHtml}
+      </div>
+    `;
+
+    document.getElementById('btnHistToStudio')?.addEventListener('click', () => setActiveView('studio'));
+    document.getElementById('btnHistBackStudio')?.addEventListener('click', () => setActiveView('studio'));
+    document.getElementById('btnHistSaveNow')?.addEventListener('click', async () => {
+      ensureStepComputed(state.activeStep);
+      const ok = await saveCurrentProjectToDisk(false);
+      if (ok) renderHistoryView();
+    });
+
+    viewHistory.querySelectorAll('[data-hist-filter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.historyFilter = /** @type {'all' | 'in_progress' | 'completed'} */ (
+          btn.getAttribute('data-hist-filter') || 'all'
+        );
+        renderHistoryView();
+      });
+    });
+
+    viewHistory.querySelectorAll('[data-hist-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-hist-open');
+        if (id) openStoredProject(id);
+      });
+    });
+
+    viewHistory.querySelectorAll('[data-hist-dl]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-hist-dl');
+        if (!id || !Storage) return;
+        const rec = await Storage.loadProject(id);
+        if (!rec || !rec.blobsRecord) return;
+        const blob = rec.blobsRecord.finalBlob || rec.blobsRecord.img1Blob;
+        if (!blob) {
+          showToast('Imagem não encontrada no disco.', true);
+          return;
+        }
+        const loaded = await Ops.loadImageFromBlob(blob, `${rec.metaRecord.name || 'projeto'}.png`);
+        const c = Ops.sourceToCanvas(loaded.img);
+        await Ops.shareOrDownloadCanvas(c, `${rec.metaRecord.name || 'projeto'}.png`);
+        Ops.releaseCanvas(c);
+      });
+    });
+
+    viewHistory.querySelectorAll('[data-hist-ren]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-hist-ren');
+        if (!id || !Storage) return;
+        const nextName = prompt('Novo nome do projeto:');
+        if (nextName && nextName.trim()) {
+          await Storage.renameProject(id, nextName.trim());
+          if (id === state.currentProjectId) state.currentProjectName = nextName.trim();
+          renderHistoryView();
+        }
+      });
+    });
+
+    viewHistory.querySelectorAll('[data-hist-del]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-hist-del');
+        if (!id || !Storage) return;
+        if (!confirm('Remover este projeto permanentemente do disco?')) return;
+        await Storage.deleteProject(id);
+        renderHistoryView();
+        showToast('Projeto removido do disco.');
+      });
+    });
+  }
+
+  async function renderSettingsView() {
+    if (!viewSettings) return;
+    const est = Storage ? await Storage.estimateStorage() : { supported: false, usage: 0, quota: 0 };
+    const pctUsed = est.quota > 0 ? Math.min(100, Math.round((est.usage / est.quota) * 1000) / 10) : 0;
+    const cfg = state.appSettings;
+
+    const themeCardsHtml = THEMES.map(
+      (t) => `
+      <button type="button" class="theme-card ${cfg.theme === t.id ? 'active' : ''}" data-theme-id="${t.id}">
+        <span class="theme-swatch">
+          <span class="theme-swatch-accent" style="background:linear-gradient(135deg, ${t.accent}, ${t.accent2})"></span>
+        </span>
+        <div>
+          <div class="theme-name">${t.name}</div>
+          <div class="theme-sub">${t.sub}</div>
+        </div>
+      </button>
+    `
+    ).join('');
+
+    viewSettings.innerHTML = `
+      <div class="view-inner">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Configurações &amp; Temas</h1>
+            <p class="view-subtitle">Preferências persistidas em disco local (IndexedDB) • interface otimizada em preto obsidian</p>
+          </div>
+          <button class="btn btn-sm" id="btnSetToStudio">🎨 Voltar ao Estúdio</button>
+        </div>
+
+        <div class="settings-grid">
+          <section class="settings-section" style="grid-column: 1 / -1">
+            <div class="settings-section-title">
+              <span>🎨 Tema Visual (Preto + Cor Principal)</span>
+              <span class="badge cyan">${THEMES.find((x) => x.id === cfg.theme)?.name || 'Preto + Ciano'}</span>
+            </div>
+            <div class="theme-grid">
+              ${themeCardsHtml}
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title">
+              <span>🔍 Corte de Alta Precisão &amp; Lupa (Etapa 1)</span>
+            </div>
+            <label class="checkbox-row">
+              <input type="checkbox" id="chkSetPrecMobile" ${cfg.precisionDefaultMobile ? 'checked' : ''} />
+              <span>Ativar Lupa de Alta Precisão automaticamente no Mobile</span>
+            </label>
+            <div class="control-row">
+              <div class="control-label">
+                <span>Sensibilidade do movimento</span>
+                <span class="control-val" id="valSetSens">${Math.round(cfg.precisionSensitivity * 100)}%</span>
+              </div>
+              <input type="range" id="rngSetSens" min="15" max="80" step="5" value="${Math.round(cfg.precisionSensitivity * 100)}" />
+            </div>
+            <div class="control-row">
+              <div class="control-label">
+                <span>Ampliação da Lupa</span>
+                <span class="control-val" id="valSetZoom">${cfg.loupeZoom.toFixed(1)}×</span>
+              </div>
+              <input type="range" id="rngSetZoom" min="1.5" max="5.0" step="0.5" value="${cfg.loupeZoom}" />
+            </div>
+            <div class="control-row">
+              <div class="control-label">
+                <span>Diâmetro da Lupa</span>
+                <span class="control-val" id="valSetSize">${cfg.loupeSize} px</span>
+              </div>
+              <input type="range" id="rngSetSize" min="100" max="176" step="4" value="${cfg.loupeSize}" />
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-title">
+              <span>💾 Disco &amp; Eficiência de Memória</span>
+            </div>
+            <label class="checkbox-row">
+              <input type="checkbox" id="chkSetAutoSave" ${cfg.autoSaveHistory ? 'checked' : ''} />
+              <span>Salvar projetos automaticamente no Histórico em disco</span>
+            </label>
+            <div style="display:flex;flex-direction:column;gap:5px;margin-top:4px">
+              <div class="control-label">
+                <span>Uso estimado em disco (IndexedDB)</span>
+                <span class="control-val">${est.supported ? `${formatBytes(est.usage)}${est.quota ? ` / ${formatBytes(est.quota)}` : ''}` : 'Indisponível'}</span>
+              </div>
+              <div class="storage-bar-track">
+                <div class="storage-bar-fill" style="width:${Math.max(2, pctUsed)}%"></div>
+              </div>
+            </div>
+            <div class="btn-row" style="margin-top:6px">
+              <button class="btn btn-sm" style="flex:1" id="btnSetFreeRam">🧹 Liberar memória inativa</button>
+              <button class="btn btn-sm btn-ghost" id="btnSetClearHist">🗑 Limpar Histórico</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('btnSetToStudio')?.addEventListener('click', () => setActiveView('studio'));
+
+    viewSettings.querySelectorAll('[data-theme-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tid = btn.getAttribute('data-theme-id') || 'obsidian-cyan';
+        applyTheme(tid, true);
+        renderSettingsView();
+        showToast('Tema atualizado!');
+      });
+    });
+
+    const saveAndSyncViewport = () => {
+      viewport.setPrecisionOptions({
+        enabled: state.precisionCut,
+        sensitivity: state.appSettings.precisionSensitivity,
+        loupeZoom: state.appSettings.loupeZoom,
+        loupeSize: state.appSettings.loupeSize,
+      });
+      if (Storage) Storage.saveSettings(state.appSettings).catch(() => {});
+    };
+
+    const chkPrecMob = /** @type {HTMLInputElement | null} */ (document.getElementById('chkSetPrecMobile'));
+    chkPrecMob?.addEventListener('change', () => {
+      state.appSettings.precisionDefaultMobile = chkPrecMob.checked;
+      if (isMobileLayout()) state.precisionCut = chkPrecMob.checked;
+      saveAndSyncViewport();
+    });
+
+    const rngSens = /** @type {HTMLInputElement | null} */ (document.getElementById('rngSetSens'));
+    rngSens?.addEventListener('input', () => {
+      state.appSettings.precisionSensitivity = (Number(rngSens.value) || 35) / 100;
+      const lbl = document.getElementById('valSetSens');
+      if (lbl) lbl.textContent = `${Math.round(state.appSettings.precisionSensitivity * 100)}%`;
+      saveAndSyncViewport();
+    });
+
+    const rngZoom = /** @type {HTMLInputElement | null} */ (document.getElementById('rngSetZoom'));
+    rngZoom?.addEventListener('input', () => {
+      state.appSettings.loupeZoom = Number(rngZoom.value) || 3.0;
+      const lbl = document.getElementById('valSetZoom');
+      if (lbl) lbl.textContent = `${state.appSettings.loupeZoom.toFixed(1)}×`;
+      saveAndSyncViewport();
+    });
+
+    const rngSize = /** @type {HTMLInputElement | null} */ (document.getElementById('rngSetSize'));
+    rngSize?.addEventListener('input', () => {
+      state.appSettings.loupeSize = Number(rngSize.value) || 132;
+      const lbl = document.getElementById('valSetSize');
+      if (lbl) lbl.textContent = `${state.appSettings.loupeSize} px`;
+      saveAndSyncViewport();
+    });
+
+    const chkAutoSave = /** @type {HTMLInputElement | null} */ (document.getElementById('chkSetAutoSave'));
+    chkAutoSave?.addEventListener('change', () => {
+      state.appSettings.autoSaveHistory = chkAutoSave.checked;
+      if (Storage) Storage.saveSettings(state.appSettings).catch(() => {});
+    });
+
+    document.getElementById('btnSetFreeRam')?.addEventListener('click', () => {
+      const count = freeInactiveMemory();
+      showToast(
+        count > 0
+          ? `Memória GPU liberada (${count} camadas inativas descarregadas).`
+          : 'Memória já otimizada!'
+      );
+    });
+
+    document.getElementById('btnSetClearHist')?.addEventListener('click', async () => {
+      if (!Storage) return;
+      if (!confirm('Apagar TODOS os projetos salvos no histórico em disco?')) return;
+      await Storage.clearAllProjects();
+      renderSettingsView();
+      showToast('Histórico em disco apagado com sucesso.');
+    });
+  }
+
+  function clearActiveProjectMemory() {
+    viewport.cancelActiveStroke();
+    state.activeStep = 1;
+    state.img1 = null;
+    setStateCanvas('img1Canvas', null);
+    state.selection1 = null;
+    state.prevSelection1 = null;
+    state.rawMask1 = null;
+    state.faceMask1 = null;
+    state.edtFace1OutSq = null;
+    state.edtFace1InSq = null;
+    setStateCanvas('corpo1Canvas', null);
+    setStateCanvas('face1Canvas', null);
+    setStateCanvas('mask1OverlayCanvas', null);
+
+    state.img2 = null;
+    state.img2Transform = { x: 0, y: 0, scale: 1, rotation: 0 };
+    setStateCanvas('img2AlignedCanvas', null);
+    setStateCanvas('face2Canvas', null);
+
+    state.customSelection2 = null;
+    state.prevCustomSelection2 = null;
+    state.customRawMask2 = null;
+    state.edtCustomOutSq = null;
+    state.edtCustomInSq = null;
+    state.mergeFaceMask = null;
+    state.edtMergeInsideSq = null;
+    setStateCanvas('imgMergeCanvas', null);
+    setStateCanvas('faceImprecisaCanvas', null);
+    setStateCanvas('corpoSemBordasCanvas', null);
+    setStateCanvas('mergeOverlayCanvas', null);
+
+    state.imgRefined = null;
+    state.refinedTransform = { x: 0, y: 0, scale: 1 };
+    setStateCanvas('refinedAlignedCanvas', null);
+    setStateCanvas('facePrecisaCanvas', null);
+
+    state.finalMerge = {
+      mode: 'none',
+      radiusPx: 28,
+      colorMatchStrength: 0,
+      prioritizeSkin: true,
+      poissonReach: 0.75,
+      protectCoreFace: true,
+    };
+    setStateCanvas('imgFinalUnblendedCanvas', null);
+    setStateCanvas('imgFinalCanvas', null);
+
+    state.skinSamplesFace = [];
+    state.skinSamplesBody = [];
+    state.step6Tool = 'pan';
+    state.step6View = 'post';
+    setStateCanvas('imgPostCanvas', null);
+    setStateCanvas('skinMaskPreviewCanvas', null);
+    state.skinDiagnostics = null;
+    state.skinPost = {
+      enabled: true,
+      method: 'oklab_ot',
+      direction: 'face_to_body',
+      strength: 1.0,
+      lumaMatch: 0.88,
+      chromaMatch: 1.0,
+      maskSelectivity: 0.72,
+      protectFeatures: true,
+      seamEqualizePx: 36,
+      borderMatchStrength: 0.9,
+      borderMutualMeet: true,
+      tempOffset: 0,
+      tintOffset: 0,
+      lightOffset: 0,
+      satScale: 1.0,
+    };
+    markDirtyFrom(2, true);
+  }
+
   function syncAllUI() {
     renderStepper();
     renderStageToolbar();
@@ -5061,73 +5326,37 @@
   btnZoomOut.addEventListener('click', () => viewport.setZoom(viewport.zoom / 1.25));
   btnZoomFit.addEventListener('click', () => viewport.fitToViewport());
 
-  btnResetAll.addEventListener('click', () => {
-    if (state.img1 && !confirm('Deseja limpar todo o projeto atual?')) return;
-    state.activeStep = 1;
-    state.img1 = null;
-    state.img1Canvas = null;
-    state.selection1 = null;
-    state.rawMask1 = null;
-    state.faceMask1 = null;
-    state.img2 = null;
-    state.img2Transform = { x: 0, y: 0, scale: 1, rotation: 0 };
-    state.customSelection2 = null;
-    state.customRawMask2 = null;
-    state.imgRefined = null;
-    state.refinedTransform = { x: 0, y: 0, scale: 1 };
-    state.finalMerge = {
-      mode: 'none',
-      radiusPx: 28,
-      colorMatchStrength: 0,
-      prioritizeSkin: true,
-      poissonReach: 0.75,
-      protectCoreFace: true,
-    };
-    state.skinSamplesFace = [];
-    state.skinSamplesBody = [];
-    state.flux.refs = [];
-    state.flux.promptDirty = false;
-    state.flux.lastError = '';
-    state.fluxLeftPanelCanvas = null;
-    state.fluxCollageCanvas = null;
-    state.fluxResultCanvas = null;
-    state.fluxResultLoaded = null;
-    state.step6Tool = 'pan';
-    state.step6View = 'post';
-    state.skinPost = {
-      enabled: true,
-      method: 'oklab_ot',
-      direction: 'face_to_body',
-      strength: 1.0,
-      lumaMatch: 0.88,
-      chromaMatch: 1.0,
-      maskSelectivity: 0.72,
-      protectFeatures: true,
-      seamEqualizePx: 14,
-      tempOffset: 0,
-      tintOffset: 0,
-      lightOffset: 0,
-      satScale: 1.0,
-    };
-    recomputeStep1Outputs(true);
+  btnResetAll.addEventListener('click', async () => {
+    if (state.img1 && !confirm('Salvar o projeto atual no histórico e iniciar um novo?')) return;
+    if (state.img1 && state.appSettings.autoSaveHistory) {
+      await saveCurrentProjectToDisk(true);
+    }
+    clearActiveProjectMemory();
+    state.currentProjectId = generateProjectId();
+    state.currentProjectName = '';
+    state.currentProjectCreatedAt = Date.now();
     viewport.setDocumentSize(0, 0, false);
+    setActiveView('studio');
     syncAllUI();
-    showToast('Projeto reiniciado.');
+    showToast('Novo projeto iniciado (anterior preservado no histórico).');
   });
 
   /**
-   * @param {1 | 'flux' | 2 | 3 | 4 | 5 | 6} [initialStep=1]
+   * @param {1 | 2 | 3 | 4 | 5 | 6} [initialStep=1]
    * @param {boolean} [compareMode=false]
    */
   async function loadDemoProject(initialStep = 1, compareMode = false) {
     try {
       const demo = await Ops.generateDemoAssets();
+      state.currentProjectId = generateProjectId();
+      state.currentProjectName = 'Demonstração Studio';
+      state.currentProjectCreatedAt = Date.now();
+
       state.img1 = demo.img1;
-      state.img1Canvas = Ops.sourceToCanvas(demo.img1.img);
+      setStateCanvas('img1Canvas', Ops.sourceToCanvas(demo.img1.img));
       const W = demo.img1.width;
       const H = demo.img1.height;
 
-      // Build a natural curved border-to-border neck cut across left->right borders
       const cutPath = [
         { x: 0, y: H * 0.43 },
         { x: W * 0.28, y: H * 0.44 },
@@ -5146,7 +5375,6 @@
       state.rawMask1 = Geo.rasterizePolygonMask(poly, W, H);
       state.faceIsOne1 = Geo.guessFaceIsOne(state.rawMask1, W, H);
 
-      // Load square AI imagem2 (860x860 -> padded & aligned over portrait 720x920)
       state.img2 = demo.img2;
       state.img2Transform = { x: 0, y: -38, scale: 1 };
 
@@ -5175,27 +5403,18 @@
         chromaMatch: 1.0,
         maskSelectivity: 0.72,
         protectFeatures: true,
-        seamEqualizePx: 14,
+        seamEqualizePx: 36,
+        borderMatchStrength: 0.9,
+        borderMutualMeet: true,
         tempOffset: 0,
         tintOffset: 0,
         lightOffset: 0,
         satScale: 1.0,
       };
 
-      state.flux.refs = [
-        {
-          id: 'demo_ref_1',
-          loaded: demo.img2,
-          dataUrl: loadedImageToPngDataUrl(demo.img2),
-        },
-      ];
-      state.flux.promptDirty = false;
-      state.fluxResultCanvas = null;
-      state.fluxResultLoaded = null;
-
       recomputeStep1Outputs(true);
       state.imgRefined = await demo.refinedSample(null);
-      recomputeStep4Outputs();
+      ensureStepComputed(Math.max(4, initialStep));
 
       viewport.setDocumentSize(W, H, true);
       state.activeStep = initialStep;
@@ -5205,8 +5424,10 @@
       } else if (urlParams.get('view') === 'mask') {
         state.step6View = 'skin-mask';
       }
+      setActiveView('studio');
       syncAllUI();
       viewport._draw();
+      scheduleAutoSaveProject();
       showToast('Exemplo completo carregado! Navegue pelas Etapas 1 a 6 ou ajuste o tom de pele.');
     } catch (err) {
       showToast(err.message || 'Erro ao gerar exemplo.', true);
@@ -5215,21 +5436,51 @@
 
   btnLoadDemo.addEventListener('click', () => loadDemoProject(1, false));
 
-  // Initial render (and optional ?demo=1&step=N deep link)
+  btnViewStudio?.addEventListener('click', () => setActiveView('studio'));
+  btnViewHistory?.addEventListener('click', () => setActiveView('history'));
+  btnViewSettings?.addEventListener('click', () => setActiveView('settings'));
+
+  // Flush unsaved project cleanly when leaving/hiding tab
+  window.addEventListener('pagehide', () => {
+    if (state.appSettings.autoSaveHistory && state.img1Canvas) {
+      saveCurrentProjectToDisk(true).catch(() => {});
+    }
+  });
+
+  // Initial render (and disk-persisted settings bootstrap + optional ?demo=1&step=N deep link)
   const urlParams = new URLSearchParams(window.location.search);
   initMobileSheet();
   initDataFolderControl();
   initAutoSelectModal();
   initEyeCalibrateModal();
-  refreshFluxBackendState(true);
-  syncAllUI();
 
-  if (urlParams.get('demo') === '1') {
-    const rawStep = urlParams.get('step');
-    const reqStep = Number(rawStep);
-    /** @type {1 | 'flux' | 2 | 3 | 4 | 5 | 6} */
-    const validStep =
-      rawStep === 'flux' ? 'flux' : reqStep >= 1 && reqStep <= 6 ? /** @type {1|2|3|4|5|6} */ (reqStep) : 1;
-    loadDemoProject(validStep, urlParams.get('view') === 'compare');
-  }
+  (async () => {
+    if (Storage) {
+      try {
+        state.appSettings = await Storage.loadSettings(DEFAULT_SETTINGS);
+      } catch (_) {
+        state.appSettings = { ...DEFAULT_SETTINGS };
+      }
+    }
+    applyTheme(state.appSettings.theme, false);
+    if (isMobileLayout() && state.appSettings.precisionDefaultMobile) {
+      state.precisionCut = true;
+    }
+    viewport.setPrecisionOptions({
+      enabled: state.precisionCut,
+      sensitivity: state.appSettings.precisionSensitivity,
+      loupeZoom: state.appSettings.loupeZoom,
+      loupeSize: state.appSettings.loupeSize,
+    });
+    syncAllUI();
+
+    if (urlParams.get('demo') === '1') {
+      const rawStep = urlParams.get('step');
+      const reqStep = Number(rawStep);
+      /** @type {1 | 2 | 3 | 4 | 5 | 6} */
+      const validStep =
+        reqStep >= 1 && reqStep <= 6 ? /** @type {1|2|3|4|5|6} */ (reqStep) : 1;
+      loadDemoProject(validStep, urlParams.get('view') === 'compare');
+    }
+  })();
 })();

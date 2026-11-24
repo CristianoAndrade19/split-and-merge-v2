@@ -493,38 +493,91 @@
   }
 
   /**
-   * Shares a PNG via native Mobile Web Share API if supported, falling back to browser PNG download.
+   * Releases GPU/backing-store memory held by a temporary or replaced HTMLCanvasElement.
+   * @param {HTMLCanvasElement | null | undefined} canvas
+   */
+  function releaseCanvas(canvas) {
+    if (!canvas) return;
+    try {
+      canvas.width = 0;
+      canvas.height = 0;
+    } catch (_) {}
+  }
+
+  /**
+   * Detects Apple iOS / iPadOS devices (where WebKit blocks silent disk downloads without opening tabs).
+   * @returns {boolean}
+   */
+  function isIOSDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (/iPad|iPhone|iPod/i.test(ua)) return true;
+    return /Macintosh/i.test(ua) && Number(navigator.maxTouchPoints || 0) > 1;
+  }
+
+  /**
+   * Synchronously converts a canvas to a PNG File object inside the user tap gesture.
+   * Synchronous conversion prevents iOS Safari from expiring transient user activation before navigator.share().
+   * @param {HTMLCanvasElement} canvas
+   * @param {string} filename
+   * @returns {File | null}
+   */
+  function canvasToPngFile(canvas, filename) {
+    if (typeof File === 'undefined' || !canvas) return null;
+    const cleanName = filename.endsWith('.png') ? filename : `${filename}.png`;
+    try {
+      const dataUrl = canvas.toDataURL('image/png');
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) return null;
+      const b64 = dataUrl.slice(comma + 1);
+      const bin = atob(b64);
+      const len = bin.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = bin.charCodeAt(i);
+      }
+      return new File([bytes], cleanName, { type: 'image/png' });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Shares a PNG via native Mobile Web Share API synchronously within tap gesture (iPhone Photos Share Sheet),
+   * falling back to browser PNG download on desktop/unsupported browsers.
    * @param {HTMLCanvasElement} canvas
    * @param {string} filename
    * @returns {Promise<'shared' | 'downloaded' | 'cancelled'>}
    */
-  function shareOrDownloadCanvas(canvas, filename) {
+  async function shareOrDownloadCanvas(canvas, filename) {
     const cleanName = filename.endsWith('.png') ? filename : `${filename}.png`;
-    return new Promise((resolve) => {
-      canvas.toBlob(async (blob) => {
-        if (!blob) {
-          resolve('cancelled');
-          return;
-        }
+    const file = canvasToPngFile(canvas, cleanName);
+
+    if (file && navigator.share && navigator.canShare) {
+      let canShareFile = false;
+      try {
+        canShareFile = navigator.canShare({ files: [file] });
+      } catch (_) {
+        canShareFile = false;
+      }
+      if (canShareFile) {
         try {
-          if (typeof File !== 'undefined' && navigator.share && navigator.canShare) {
-            const file = new File([blob], cleanName, { type: 'image/png' });
-            if (navigator.canShare({ files: [file] })) {
-              await navigator.share({ files: [file], title: cleanName });
-              resolve('shared');
-              return;
-            }
-          }
+          await navigator.share({ files: [file], title: cleanName });
+          return 'shared';
         } catch (err) {
           if (err && err.name === 'AbortError') {
-            resolve('cancelled');
-            return;
+            return 'cancelled';
+          }
+          // On iOS, never open an annoying extra tab via <a download> fallback if share sheet failed silently
+          if (isIOSDevice()) {
+            return 'cancelled';
           }
         }
-        downloadCanvasAsPng(canvas, cleanName);
-        resolve('downloaded');
-      }, 'image/png');
-    });
+      }
+    }
+
+    downloadCanvasAsPng(canvas, cleanName);
+    return 'downloaded';
   }
 
   /**
@@ -533,12 +586,14 @@
    * @param {string} filename
    */
   function downloadCanvasAsPng(canvas, filename) {
+    const cleanName = filename.endsWith('.png') ? filename : `${filename}.png`;
     canvas.toBlob((blob) => {
       if (!blob) return;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename.endsWith('.png') ? filename : `${filename}.png`;
+      a.download = cleanName;
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1276,107 +1331,11 @@
     return { img1, img2, refinedSample };
   }
 
-  /**
-   * Computes tight bounding box of non-transparent pixels in a canvas.
-   * @param {HTMLCanvasElement} canvas
-   * @param {number} [padPx=12]
-   * @returns {RectBox | null}
-   */
-  function extractBoundingBoxOfAlpha(canvas, padPx = 12) {
-    const W = canvas.width;
-    const H = canvas.height;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
-    const data = ctx.getImageData(0, 0, W, H).data;
-    let minX = W;
-    let minY = H;
-    let maxX = -1;
-    let maxY = -1;
-    for (let y = 0; y < H; y++) {
-      const row = y * W;
-      for (let x = 0; x < W; x++) {
-        if (data[(row + x) * 4 + 3] > 8) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    if (maxX < minX || maxY < minY) return null;
-    const x0 = Math.max(0, minX - padPx);
-    const y0 = Math.max(0, minY - padPx);
-    const x1 = Math.min(W - 1, maxX + padPx);
-    const y1 = Math.min(H - 1, maxY + padPx);
-    return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
-  }
-
-  /**
-   * Composites a canvas (or cropped sub-region) over a solid background color.
-   * @param {HTMLCanvasElement} sourceCanvas
-   * @param {string} [bgColor='#000000']
-   * @param {RectBox | null} [cropBox=null]
-   * @returns {HTMLCanvasElement}
-   */
-  function flattenCanvasWithBg(sourceCanvas, bgColor = '#000000', cropBox = null) {
-    const box = cropBox || { x: 0, y: 0, w: sourceCanvas.width, h: sourceCanvas.height };
-    const out = createCanvas(box.w, box.h);
-    const ctx = out.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = bgColor || '#000000';
-      ctx.fillRect(0, 0, out.width, out.height);
-      ctx.drawImage(sourceCanvas, box.x, box.y, box.w, box.h, 0, 0, out.width, out.height);
-    }
-    return out;
-  }
-
-  /**
-   * Concatenates `leftCanvas` (leftmost) and up to 6 reference images side-by-side.
-   * Mirrors `build_side_by_side_collage` in flux_img2img.py for instant live preview.
-   *
-   * @param {HTMLCanvasElement} leftCanvas
-   * @param {(HTMLImageElement | HTMLCanvasElement)[]} refSources
-   * @param {{ gapPx?: number, bgColor?: string }} [opts]
-   * @returns {HTMLCanvasElement}
-   */
-  function composeSideBySideCollageCanvas(leftCanvas, refSources = [], opts = {}) {
-    const gapPx = Math.max(0, Math.round(opts.gapPx ?? 4));
-    const bgColor = opts.bgColor || '#000000';
-    const panelH = Math.max(256, Math.min(1024, leftCanvas.height));
-
-    /** @type {{ src: HTMLImageElement | HTMLCanvasElement, w: number, h: number }[]} */
-    const panels = [];
-    const pushPanel = (src, sw, sh) => {
-      const scaledW =
-        sh !== panelH ? Math.max(16, Math.round(sw * (panelH / Math.max(1, sh)))) : sw;
-      panels.push({ src, w: scaledW, h: panelH });
-    };
-
-    pushPanel(leftCanvas, leftCanvas.width, leftCanvas.height);
-    refSources.slice(0, 6).forEach((src) => {
-      const sw = src instanceof HTMLImageElement ? src.naturalWidth || src.width : src.width;
-      const sh = src instanceof HTMLImageElement ? src.naturalHeight || src.height : src.height;
-      pushPanel(src, sw, sh);
-    });
-
-    const totalW =
-      panels.reduce((acc, p) => acc + p.w, 0) + gapPx * Math.max(0, panels.length - 1);
-    const canvas = createCanvas(totalW, panelH);
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = bgColor;
-      ctx.fillRect(0, 0, totalW, panelH);
-      let cursorX = 0;
-      for (const p of panels) {
-        ctx.drawImage(p.src, cursorX, 0, p.w, p.h);
-        cursorX += p.w + gapPx;
-      }
-    }
-    return canvas;
-  }
-
   global.SplitMergeImageOps = {
     createCanvas,
+    releaseCanvas,
+    isIOSDevice,
+    canvasToPngFile,
     sourceToCanvas,
     loadImageFromBlob,
     loadImageFromFile: loadImageFromBlob,
@@ -1388,9 +1347,6 @@
     uniteByComplementaryMask,
     buildFinalImage,
     cropCanvas,
-    extractBoundingBoxOfAlpha,
-    flattenCanvasWithBg,
-    composeSideBySideCollageCanvas,
     createMaskOverlayCanvas,
     copyCanvasToClipboard,
     copyTextToClipboard,

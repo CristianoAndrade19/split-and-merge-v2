@@ -6,16 +6,23 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Pick an available port starting from $Port
+# Pick an available port starting from $Port (bind Any so LAN mobile devices can connect cleanly; fallback Loopback)
 $Listener = $null
 for ($p = $Port; $p -lt ($Port + 30); $p++) {
   try {
-    $Listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $p)
+    $Listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $p)
     $Listener.Start()
     $Port = $p
     break
   } catch {
-    $Listener = $null
+    try {
+      $Listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $p)
+      $Listener.Start()
+      $Port = $p
+      break
+    } catch {
+      $Listener = $null
+    }
   }
 }
 
@@ -25,9 +32,19 @@ if (-not $Listener) {
 }
 
 $Url = "http://127.0.0.1:$Port/"
+$LanIp = $null
+try {
+  $LanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+    Select-Object -First 1 -ExpandProperty IPAddress)
+} catch {}
+
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Cyan
 Write-Host "  Split & Merge Studio rodando em: $Url" -ForegroundColor Green
+if ($LanIp) {
+  Write-Host "  Acesso Mobile (mesmo Wi-Fi): http://${LanIp}:$Port/" -ForegroundColor Cyan
+}
 Write-Host "  (Mantenha esta janela aberta enquanto usar o app)" -ForegroundColor Gray
 Write-Host "  Pressione Ctrl+C para encerrar." -ForegroundColor Gray
 Write-Host "=====================================================" -ForegroundColor Cyan
@@ -35,33 +52,6 @@ Write-Host ""
 
 if (-not $NoBrowser) {
   Start-Process $Url
-}
-
-# Start companion Python FLUX.1 API on port 8766 if available and not already listening
-$FluxApiProc = $null
-$FluxServerPy = Join-Path $Root 'flux_server.py'
-if (Test-Path $FluxServerPy) {
-  $portInUse = $false
-  try {
-    $probe = New-Object System.Net.Sockets.TcpClient
-    $probe.Connect('127.0.0.1', 8766)
-    $probe.Close()
-    $portInUse = $true
-  } catch {
-    $portInUse = $false
-  }
-
-  if (-not $portInUse) {
-    $pyCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pyCmd) {
-      try {
-        $FluxApiProc = Start-Process -FilePath $pyCmd.Source -ArgumentList "`"$FluxServerPy`" --api-only --port=8766 --no-browser" -WindowStyle Hidden -PassThru
-        Write-Host "  API FLUX.1 auxiliar iniciada em http://127.0.0.1:8766/" -ForegroundColor DarkCyan
-      } catch {
-        $FluxApiProc = $null
-      }
-    }
-  }
 }
 
 $MimeTypes = @{
@@ -211,8 +201,5 @@ try {
   }
 } finally {
   $Listener.Stop()
-  if ($FluxApiProc -and -not $FluxApiProc.HasExited) {
-    try { Stop-Process -Id $FluxApiProc.Id -Force } catch {}
-  }
 }
 

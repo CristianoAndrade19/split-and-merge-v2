@@ -3,10 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
-  <meta name="theme-color" content="#090d16" />
+  <meta name="theme-color" id="metaThemeColor" content="#000000" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>Split &amp; Merge Studio — Corpo + Face + IA</title>
+  <title>Split &amp; Merge Studio — Corpo + Face</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('sm_theme') || 'obsidian-cyan';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
@@ -17,29 +25,41 @@
         <div class="brand-logo">S&amp;M</div>
         <div>
           <div class="brand-title">Split &amp; Merge Studio</div>
-          <div class="brand-sub">Corpo &amp; Face • Fluxo Manual com IA</div>
+          <div class="brand-sub">Corpo &amp; Face • Precisão &amp; Pele Natural</div>
         </div>
       </div>
 
       <nav class="stepper" id="stepperNav" aria-label="Etapas do fluxo"></nav>
 
       <div class="topbar-actions">
+        <div class="view-tabs" role="tablist" aria-label="Áreas do app">
+          <button type="button" class="btn btn-sm view-tab active" id="btnViewStudio" title="Estúdio de edição">
+            <span class="btn-ico">🎨</span><span class="btn-lbl">Estúdio</span>
+          </button>
+          <button type="button" class="btn btn-sm view-tab" id="btnViewHistory" title="Histórico de projetos no disco">
+            <span class="btn-ico">🕘</span><span class="btn-lbl">Histórico</span>
+          </button>
+          <button type="button" class="btn btn-sm view-tab" id="btnViewSettings" title="Temas e Configurações">
+            <span class="btn-ico">⚙</span><span class="btn-lbl">Config</span>
+          </button>
+        </div>
+
         <div class="save-folder-box" title="Pasta padrão para salvar imagens geradas no app">
-          <span class="folder-label">📁 Salvar em:</span>
+          <span class="folder-label">📁 Salvar:</span>
           <select id="selDataFolder" class="folder-select" title="Pasta de destino dentro de /data"></select>
           <button class="btn btn-xs btn-ghost" id="btnOpenDataFolder" title="Abrir pasta de downloads no Windows Explorer">Abrir</button>
         </div>
         <button class="btn btn-sm btn-ghost" id="btnLoadDemo" title="Carrega um par de imagens de demonstração para testar todo o fluxo">
-          ✨ Exemplo
+          <span class="btn-ico">✨</span><span class="btn-lbl">Exemplo</span>
         </button>
-        <button class="btn btn-sm btn-ghost" id="btnResetAll" title="Limpar projeto atual">
-          ↺ Novo
+        <button class="btn btn-sm btn-ghost" id="btnResetAll" title="Salvar atual no histórico e iniciar novo projeto">
+          <span class="btn-ico">↺</span><span class="btn-lbl">Novo</span>
         </button>
       </div>
     </header>
 
-    <!-- Main Workspace -->
-    <main class="workspace">
+    <!-- Main Studio Workspace -->
+    <main class="workspace" id="workspaceStudio">
       <!-- Interactive Canvas Area -->
       <section class="stage-area">
         <div class="canvas-toolbar">
@@ -88,6 +108,10 @@
         <div class="sidebar-scroll" id="sidebarContent"></div>
       </aside>
     </main>
+
+    <!-- Disk-Persisted Views: History & Settings -->
+    <section class="full-view" id="viewHistory" hidden aria-label="Histórico de projetos"></section>
+    <section class="full-view" id="viewSettings" hidden aria-label="Configurações e temas"></section>
   </div>
 
   <!-- Hidden File Inputs -->
@@ -97,7 +121,6 @@
   <input type="file" id="fileInputAutoPair" accept="image/*" multiple hidden />
   <input type="file" id="fileInputAutoImg1" accept="image/*" hidden />
   <input type="file" id="fileInputAutoFace" accept="image/*" hidden />
-  <input type="file" id="fileInputFluxRefs" accept="image/*" multiple hidden />
 
   <!-- Modal: Auto Seleção via Rosto Isolado -->
   <div class="modal-backdrop" id="modalAutoSelect">
@@ -204,6 +227,7 @@
   <script defer src="js/skinMatch.js"></script>
   <script defer src="js/viewport.js"></script>
   <script defer src="js/prompts.js"></script>
+  <script defer src="js/storage.js"></script>
   <script defer src="js/app.js"></script>
 </body>
 </html>

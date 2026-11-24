@@ -979,11 +979,13 @@
       Math.abs(options.tintOffset) > 0.1 ||
       Math.abs(options.lightOffset) > 0.1 ||
       Math.abs(options.satScale - 1) > 0.005;
+    const borderStrength = Math.max(0, Math.min(1, Number(options.borderMatchStrength ?? 0.9)));
+    const hasBorderHarm = Number(options.seamEqualizePx || 0) > 0 && borderStrength > 0.01;
 
     if (
       !options.enabled ||
       (!faceDist.valid && !bodyDist.valid) ||
-      (options.strength <= 0.001 && !hasFineTune)
+      (options.strength <= 0.001 && !hasFineTune && !hasBorderHarm)
     ) {
       outCtx.putImageData(srcImgData, 0, 0);
       return {
@@ -1086,6 +1088,7 @@
       const dTint = applyManualGrade ? options.tintOffset * 0.0009 : 0; // Olive (-) <-> Rosy (+)
       const dTemp = applyManualGrade ? options.tempOffset * 0.0011 : 0; // Cool (-) <-> Warm (+)
       const satMul = applyManualGrade ? options.satScale : 1.0;
+      const tmpOk = new Float32Array(3);
 
       for (let i = 0; i < n; i++) {
         const wSkin = skinWeights[i];
@@ -1115,13 +1118,12 @@
               const distSeam = Math.sqrt(edtToOutsideSq[i]);
               const seamPull = 1 - smoothstep(0, Math.max(24, options.seamEqualizePx * 2.2), distSeam);
               if (seamPull > 0.01) {
-                const okOrig = new Float32Array(3);
-                rgbToOklabInto(origRgba[p4], origRgba[p4 + 1], origRgba[p4 + 2], okOrig, 0);
+                rgbToOklabInto(origRgba[p4], origRgba[p4 + 1], origRgba[p4 + 2], tmpOk, 0);
                 // Only pull if orig pixel is also plausible skin/similar luminance
-                if (Math.abs(okOrig[0] - Lm) < 0.16) {
-                  Lm = Lm + (okOrig[0] - Lm) * seamPull * 0.65;
-                  Am = Am + (okOrig[1] - Am) * seamPull * 0.75;
-                  Bm = Bm + (okOrig[2] - Bm) * seamPull * 0.75;
+                if (Math.abs(tmpOk[0] - Lm) < 0.16) {
+                  Lm = Lm + (tmpOk[0] - Lm) * seamPull * 0.65;
+                  Am = Am + (tmpOk[1] - Am) * seamPull * 0.75;
+                  Bm = Bm + (tmpOk[2] - Bm) * seamPull * 0.75;
                 }
               }
             }
@@ -1135,7 +1137,6 @@
             const mel1 = (mel0 - mhStats.mS[1]) * mhStats.r[1] + mhStats.mT[1];
             const hem1 = (hem0 - mhStats.mS[2]) * mhStats.r[2] + mhStats.mT[2];
             const [tr, tg, tb] = melaninHemoToRgb(sh1, mel1, hem1);
-            const tmpOk = new Float32Array(3);
             rgbToOklabInto(tr, tg, tb, tmpOk, 0);
             Lm = tmpOk[0];
             Am = tmpOk[1];
@@ -1194,24 +1195,19 @@
       applyRegionTransfer(bodyDist, faceDist, bodySkinWeights, 0.5, false);
     }
 
-    // Optional soft seam skin polish right along the border between Face & Body
-    if (options.seamEqualizePx > 0 && edtToOutsideSq) {
-      const rSeam = options.seamEqualizePx;
-      for (let i = 0; i < n; i++) {
-        if (mergeFaceMask[i] !== 1) continue;
-        const wSkin = faceSkinWeights[i];
-        if (wSkin < 0.2) continue;
-        const d = Math.sqrt(edtToOutsideSq[i]);
-        if (d < rSeam) {
-          const t = (1 - smoothstep(0, rSeam, d)) * wSkin * 0.65;
-          const p4 = i * 4;
-          if (Math.abs(rgba[p4] - origRgba[p4]) < 45) {
-            rgba[p4] = Math.round(rgba[p4] * (1 - t) + origRgba[p4] * t);
-            rgba[p4 + 1] = Math.round(rgba[p4 + 1] * (1 - t) + origRgba[p4 + 1] * t);
-            rgba[p4 + 2] = Math.round(rgba[p4 + 2] * (1 - t) + origRgba[p4 + 2] * t);
-          }
-        }
-      }
+    // Spatially-varying frequency-separated Oklab border skin harmonization
+    if (hasBorderHarm && faceDist.valid && bodyDist.valid) {
+      harmonizeBorderSkinOklab(
+        rgba,
+        oklab,
+        W,
+        H,
+        mergeFaceMask,
+        edtToOutsideSq,
+        faceSkinWeights,
+        bodySkinWeights,
+        options
+      );
     }
 
     outCtx.putImageData(srcImgData, 0, 0);
@@ -1256,8 +1252,255 @@
     };
   }
 
+  /**
+   * Ensures skin color & luminance are spatially consistent across both sides of the seam border
+   * using spatially-varying directional Oklab collar profiling, mutual boundary convergence,
+   * and bilateral texture preservation (pores/micro-detail remain 100% intact).
+   *
+   * @param {Uint8ClampedArray} rgba
+   * @param {Float32Array} oklab
+   * @param {number} W
+   * @param {number} H
+   * @param {Uint8Array} mergeFaceMask
+   * @param {Float32Array | null} edtToOutsideSq
+   * @param {Float32Array} faceSkinWeights
+   * @param {Float32Array} bodySkinWeights
+   * @param {SkinPostOptions} options
+   */
+  function harmonizeBorderSkinOklab(
+    rgba,
+    oklab,
+    W,
+    H,
+    mergeFaceMask,
+    edtToOutsideSq,
+    faceSkinWeights,
+    bodySkinWeights,
+    options
+  ) {
+    const Geo = global.SplitMergeGeometry;
+    if (!Geo || typeof Geo.computeEDT2DSq !== 'function') return;
+
+    const borderStrength = Math.max(0, Math.min(1, Number(options.borderMatchStrength ?? 0.9)));
+    const radius = Math.max(4, Math.min(90, Math.round(options.seamEqualizePx || 36)));
+    if (borderStrength <= 0.01 || radius <= 2) return;
+
+    const faceEdtSq = edtToOutsideSq || Geo.computeEDT2DSq(mergeFaceMask, 0, W, H);
+    const bodyEdtSq = Geo.computeEDT2DSq(mergeFaceMask, 1, W, H);
+    const collarW = Math.max(10, Math.min(28, Math.round(radius * 0.55)));
+    const cellSize = Math.max(24, Math.round(collarW * 1.25));
+    const gw = Math.max(1, Math.ceil(W / cellSize));
+    const gh = Math.max(1, Math.ceil(H / cellSize));
+    const numCells = gw * gh;
+
+    const faceSum = new Float32Array(numCells * 3);
+    const faceW = new Float32Array(numCells);
+    const bodySum = new Float32Array(numCells * 3);
+    const bodyW = new Float32Array(numCells);
+
+    let gFaceL = 0, gFaceA = 0, gFaceB = 0, gFaceWt = 0;
+    let gBodyL = 0, gBodyA = 0, gBodyB = 0, gBodyWt = 0;
+
+    // 1. Sample skin collar pixels on both sides of the boundary into spatial grid cells
+    for (let y = 0; y < H; y++) {
+      const cy = Math.min(gh - 1, (y / cellSize) | 0);
+      const row = y * W;
+      const cRow = cy * gw;
+      for (let x = 0; x < W; x++) {
+        const i = row + x;
+        const cx = Math.min(gw - 1, (x / cellSize) | 0);
+        const ci = cRow + cx;
+        const ci3 = ci * 3;
+        const i3 = i * 3;
+
+        if (mergeFaceMask[i] === 1) {
+          const w = faceSkinWeights[i];
+          if (w > 0.15) {
+            const d2 = faceEdtSq[i];
+            if (d2 > 0 && d2 <= collarW * collarW) {
+              const L = oklab[i3], a = oklab[i3 + 1], b = oklab[i3 + 2];
+              faceSum[ci3] += L * w;
+              faceSum[ci3 + 1] += a * w;
+              faceSum[ci3 + 2] += b * w;
+              faceW[ci] += w;
+              gFaceL += L * w;
+              gFaceA += a * w;
+              gFaceB += b * w;
+              gFaceWt += w;
+            }
+          }
+        } else {
+          const w = bodySkinWeights[i];
+          if (w > 0.15) {
+            const d2 = bodyEdtSq[i];
+            if (d2 > 0 && d2 <= collarW * collarW) {
+              const L = oklab[i3], a = oklab[i3 + 1], b = oklab[i3 + 2];
+              bodySum[ci3] += L * w;
+              bodySum[ci3 + 1] += a * w;
+              bodySum[ci3 + 2] += b * w;
+              bodyW[ci] += w;
+              gBodyL += L * w;
+              gBodyA += a * w;
+              gBodyB += b * w;
+              gBodyWt += w;
+            }
+          }
+        }
+      }
+    }
+
+    if (gFaceWt < 4 || gBodyWt < 4) return;
+    gFaceL /= gFaceWt; gFaceA /= gFaceWt; gFaceB /= gFaceWt;
+    gBodyL /= gBodyWt; gBodyA /= gBodyWt; gBodyB /= gBodyWt;
+    const gDeltaL = gBodyL - gFaceL;
+    const gDeltaA = gBodyA - gFaceA;
+    const gDeltaB = gBodyB - gFaceB;
+
+    // 2. Smooth grid cell averages with 3x3 Gaussian weights & blend sparse cells to global delta
+    const smoothGrid = (sumArr, wArr, gL, gA, gB) => {
+      const out = new Float32Array(numCells * 3);
+      for (let cy = 0; cy < gh; cy++) {
+        for (let cx = 0; cx < gw; cx++) {
+          let sL = 0, sA = 0, sB = 0, sW = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const ny = cy + dy;
+            if (ny < 0 || ny >= gh) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = cx + dx;
+              if (nx < 0 || nx >= gw) continue;
+              const ni = ny * gw + nx;
+              const nw = wArr[ni];
+              if (nw <= 0) continue;
+              const kern = (dx === 0 ? 2 : 1) * (dy === 0 ? 2 : 1);
+              const wt = nw * kern;
+              const ni3 = ni * 3;
+              sL += (sumArr[ni3] / nw) * wt;
+              sA += (sumArr[ni3 + 1] / nw) * wt;
+              sB += (sumArr[ni3 + 2] / nw) * wt;
+              sW += wt;
+            }
+          }
+          const idx3 = (cy * gw + cx) * 3;
+          const conf = Math.min(1, sW / 32);
+          if (sW > 1e-4) {
+            const mL = sL / sW, mA = sA / sW, mB = sB / sW;
+            out[idx3] = gL * (1 - conf) + mL * conf;
+            out[idx3 + 1] = gA * (1 - conf) + mA * conf;
+            out[idx3 + 2] = gB * (1 - conf) + mB * conf;
+          } else {
+            out[idx3] = gL;
+            out[idx3 + 1] = gA;
+            out[idx3 + 2] = gB;
+          }
+        }
+      }
+      return out;
+    };
+
+    const faceGrid = smoothGrid(faceSum, faceW, gFaceL, gFaceA, gFaceB);
+    const bodyGrid = smoothGrid(bodySum, bodyW, gBodyL, gBodyA, gBodyB);
+
+    // 3. Determine bidirectional meeting ratio at d = 0
+    const mutualMeet = options.borderMutualMeet !== false;
+    let bodyShare = 0.5;
+    if (!mutualMeet) {
+      bodyShare = options.direction === 'body_to_face' ? 1.0 : 0.0;
+    } else if (options.direction === 'face_to_body') {
+      bodyShare = 0.28;
+    } else if (options.direction === 'body_to_face') {
+      bodyShare = 0.78;
+    }
+    const faceShare = 1 - bodyShare;
+
+    const sampleGrid3 = (grid, x, y) => {
+      const gx = Math.max(0, Math.min(gw - 1, x / cellSize - 0.5));
+      const gy = Math.max(0, Math.min(gh - 1, y / cellSize - 0.5));
+      const x0 = Math.floor(gx);
+      const y0 = Math.floor(gy);
+      const x1 = Math.min(gw - 1, x0 + 1);
+      const y1 = Math.min(gh - 1, y0 + 1);
+      const fx = gx - x0;
+      const fy = gy - y0;
+      const w00 = (1 - fx) * (1 - fy);
+      const w10 = fx * (1 - fy);
+      const w01 = (1 - fx) * fy;
+      const w11 = fx * fy;
+      const i00 = (y0 * gw + x0) * 3;
+      const i10 = (y0 * gw + x1) * 3;
+      const i01 = (y1 * gw + x0) * 3;
+      const i11 = (y1 * gw + x1) * 3;
+      return [
+        grid[i00] * w00 + grid[i10] * w10 + grid[i01] * w01 + grid[i11] * w11,
+        grid[i00 + 1] * w00 + grid[i10 + 1] * w10 + grid[i01 + 1] * w01 + grid[i11 + 1] * w11,
+        grid[i00 + 2] * w00 + grid[i10 + 2] * w10 + grid[i01 + 2] * w01 + grid[i11 + 2] * w11,
+      ];
+    };
+
+    const rSq = radius * radius;
+    const twoSigmaSq = 2 * 0.018;
+
+    // 4. Apply frequency-separated bilateral Oklab offset within boundary band
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        const i = row + x;
+        const isFace = mergeFaceMask[i] === 1;
+        const wSkin = isFace ? faceSkinWeights[i] : bodySkinWeights[i];
+        if (wSkin <= 0.02) continue;
+
+        const d2 = isFace ? faceEdtSq[i] : bodyEdtSq[i];
+        if (d2 >= rSq) continue;
+
+        const share = isFace ? faceShare : bodyShare;
+        if (share <= 0.001) continue;
+
+        const d = Math.sqrt(d2);
+        const t = 1 - smoothstep(0, radius, d);
+        if (t <= 0.001) continue;
+        const falloff = Math.pow(t, 1.35);
+
+        const [fL, fA, fB] = sampleGrid3(faceGrid, x, y);
+        const [bL, bA, bB] = sampleGrid3(bodyGrid, x, y);
+
+        // Clamp local offset gently toward global delta to prevent outlier spikes
+        const dL = (bL - fL) * 0.72 + gDeltaL * 0.28;
+        const dA = (bA - fA) * 0.72 + gDeltaA * 0.28;
+        const dB = (bB - fB) * 0.72 + gDeltaB * 0.28;
+
+        const i3 = i * 3;
+        const L0 = oklab[i3];
+        const A0 = oklab[i3 + 1];
+        const B0 = oklab[i3 + 2];
+
+        const refL = isFace ? fL : bL;
+        const refA = isFace ? fA : bA;
+        const refB = isFace ? fB : bB;
+        const distOkSq =
+          (L0 - refL) * (L0 - refL) + (A0 - refA) * (A0 - refA) * 4 + (B0 - refB) * (B0 - refB) * 4;
+        const bilat = Math.exp(-distOkSq / twoSigmaSq);
+        if (bilat <= 0.02) continue;
+
+        const sign = isFace ? 1 : -1;
+        const gain = borderStrength * share * falloff * wSkin * bilat * sign;
+        const Lf = Math.max(0, Math.min(1, L0 + dL * gain));
+        const Af = A0 + dA * gain;
+        const Bf = B0 + dB * gain;
+
+        const [nr, ng, nb] = oklabToRgbTuple(Lf, Af, Bf);
+        const p4 = i * 4;
+        rgba[p4] = nr;
+        rgba[p4 + 1] = ng;
+        rgba[p4 + 2] = nb;
+        oklab[i3] = Lf;
+        oklab[i3 + 1] = Af;
+        oklab[i3 + 2] = Bf;
+      }
+    }
+  }
+
   global.SplitMergeSkinPost = {
     applySkinPostProcess,
+    harmonizeBorderSkinOklab,
     computeDeltaE2000,
     symEigen3x3,
     computeMongeKantorovichMatrix,

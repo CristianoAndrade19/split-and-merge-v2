@@ -1,54 +1,165 @@
-# IMAGE EDITING PROMPT: AI AVATAR FACE AND HAIRSTYLE REPLACEMENT WITH STRICT PIXEL PRESERVATION
+IMAGE EDITING PROMPT: AI AVATAR FACIAL IDENTITY AND HAIRSTYLE REPLACEMENT WITH STRICT PIXEL PRESERVATION
+Replace the original AI avatar's facial identity in the first image with the facial identity of the AI avatar depicted in the provided reference images, while also replacing the original hairstyle with the hairstyle from the reference images.
 
-Replace the original AI avatar's facial identity and hairstyle in the **first image** using the provided reference images. Both subjects are AI-generated avatars.
+CRITICAL: Both the original subject and the reference subject are AI-generated avatars, not real persons. Treat this task exclusively as an AI avatar appearance and identity replacement.
 
-**The first image is the immutable source of the final composition. The reference images are the exclusive sources for BOTH facial identity and hairstyle.**
+ABSOLUTE HAIRSTYLE REPLACEMENT REQUIREMENT: The hairstyle in the final image MUST be taken entirely from the reference avatar images, not from the first image. Do NOT preserve, reproduce, imitate, incorporate, or otherwise use the hairstyle from the original/first image. The reference images are the exclusive source of truth for the hair.
 
-### 1. Facial Identity and Hairstyle Replacement
-- Reproduce the reference avatar's facial identity accurately, including facial structure, proportions, eyes, eyebrows, nose, lips, jawline, and skin tone.
-- Reproduce the reference avatar's hairstyle, including haircut, shape, length, hairline, texture, volume, and color.
-- Do not retain or incorporate any facial or hairstyle characteristics from the original avatar.
-- Adapt the replacement face and hair naturally to the original head position, orientation, perspective, lighting, and rendering style.
+Everything in the original image must remain exactly the same, except for the original avatar's facial identity, hairstyle, and the specific areas explicitly authorized for modification using the provided transparent PNG. The objective is to create a seamless, photorealistic or stylistically consistent avatar edit that preserves the original image while introducing only the explicitly requested modifications. The original image must never be treated as a starting point for generating a new interpretation of the composition; it is the immutable source of the final image.
 
-### 2. Absolute Original Image Preservation
-Everything outside the specifically authorized facial modification area must remain **pixel-identical to the first image**.
+1. AI Avatar Facial Identity Replacement
+Use all provided reference images as the exclusive source of the replacement AI avatar's facial identity. Reproduce the reference avatar's facial characteristics with maximum accuracy, including:
 
-Preserve without modification:
-- Original image dimensions, resolution, aspect ratio, and proportions.
-- Body, anatomy, clothing, accessories, and pose.
-- Background, environment, objects, and lighting.
-- Camera angle, framing, perspective, colors, textures, and shadows.
+Face shape, bone structure, and proportions.
 
-**Do not crop, resize, extend, reconstruct, regenerate, or reinterpret any part of the original image.** The final image must have exactly the same dimensions and composition as the first image.
+Eyes, eyebrows, nose, and lips.
 
-### 3. Transparent PNG: Cut-Off Areas Must Remain Untouched
+Jawline, cheeks, and chin.
 
-Treat every transparent or completely black/white region in the provided PNG as an **intentional cut-off area**, not as missing information that needs completion.
+Skin tone, texture, and distinctive facial characteristics.
 
-- Transparent areas represent absent content. Do not fill, reconstruct, imagine, or generate anything within them.
-- Black/white areas must remain black. Never interpret them as transparency or hidden information.
-- Never infer what might exist behind, around, or within these cut-off regions.
-- Do not generate missing anatomy, hair, clothing, background, or other visual details.
+Overall facial design and recognizable avatar identity.
 
-### 4. Critical Attention to Cut-Off Boundaries and Edges
+Preserve the reference avatar's recognizable visual identity without blending its facial features with those of the original avatar. Naturally adapt the replacement avatar's face to the original avatar's head position, expression, perspective, proportions, rendering style, and lighting.
 
-**Pay particular attention to the exact boundaries of transparent and black/white cut-off regions.**
+2. Strict Reference Hairstyle Replacement
+The reference images MUST remain the exclusive reference for all hair-related characteristics.
+Reproduce the reference hairstyle from the reference images with maximum accuracy, including:
 
-- Preserve the original image's visible contours, silhouettes, and edges exactly wherever they are not explicitly authorized for modification.
-- Do not smooth, extend, reshape, blend, or reconstruct the edges of cut-off areas.
-- Do not introduce new pixels, details, shadows, textures, or transitions beyond the explicitly authorized modification regions.
-- Maintain perfect continuity between modified and unmodified areas, without shifting, distorting, or altering their original boundaries.
+Haircut and overall hairstyle.
 
-### 5. Final Requirements
+Hair length and shape.
 
-Produce a single edited image satisfying all of the following:
+Hairline, forehead framing, and hair growth pattern.
 
-1. Reference avatar's facial identity and hairstyle.
-2. Original image's exact dimensions, proportions, framing, and composition.
-3. Pixel-identical preservation of every unrelated region.
-4. Transparent areas remain unfilled; black/white areas remain black.
-5. All cut-off boundaries and surrounding edges remain exactly as represented in the source.
-6. No invented, inferred, or reconstructed visual information.
-7. Generated hair should be behind the shoulders.
+Hair volume and density.
 
-**ABSOLUTE PRIORITY: PRESERVE THE FIRST IMAGE PIXEL BY PIXEL, EXCEPT FOR THE EXPLICITLY AUTHORIZED FACIAL AND HAIR MODIFICATIONS. NEVER COMPLETE CUT-OFF AREAS. NEVER INVENT MISSING CONTENT. THE ORIGINAL EDGES AND SILHOUETTES MUST REMAIN UNCHANGED.**
+Hair texture and individual strand characteristics.
+
+Hair color and tonal variations.
+
+Hair positioning, direction, parting, and styling.
+
+Sideburns, fringes, locks, flyaways, and other distinctive hair details.
+
+Do not introduce, preserve, or incorporate any hairstyle characteristics from the original/first image. Do not retain the original hairline, hair volume, length, color, shape, or styling from the first image. The reference images provide BOTH facial identity and hairstyle. Naturally adapt the replacement hairstyle to the original avatar's head position, perspective, proportions, rendering style, and lighting while faithfully following the reference avatar's actual hair appearance.
+
+3. Absolute Preservation of the Original Image
+Everything besides the avatar's facial identity, hairstyle, and explicitly designated PNG modification areas must remain unchanged. Treat the first image as the definitive and immutable source for every visual element other than the explicitly authorized modifications.
+Preserve exactly:
+
+Original avatar head position, orientation, and overall scale.
+
+Original avatar body, anatomy, proportions, and positioning.
+
+Neck, shoulders, arms, hands, legs, and feet.
+
+Clothing, accessories, and garment details.
+
+Pose, gestures, and body positioning.
+
+Background, environment, and surrounding objects.
+
+Lighting, shadows, reflections, and colors.
+
+Camera angle, perspective, framing, and composition.
+
+Original image dimensions, resolution, and aspect ratio.
+
+Original rendering style, texture, grain, sharpness, and depth of field.
+
+Do not replace the entire avatar, reconstruct the body, regenerate or reinterpret the image, or modify unrelated image regions. Do not apply global enhancements, color corrections, sharpening, denoising, or beautification. The original image must remain pixel-identical everywhere outside the explicitly authorized modification regions.
+
+4. Transparent PNG Reference: Strict Pixel and Transparency Preservation
+A separate transparent PNG will be provided as an additional visual reference containing specific visual information intended for the corresponding areas of the edited AI avatar image.CRITICAL: The PNG must be treated as a literal visual reference, not as a request to imagine, infer, generate, restore, or reconstruct any visual information that is not explicitly represented in its actual pixel content. The PNG must be interpreted according to its actual pixel values, including its RGB and alpha channels.
+
+4.1. Transparency Preservation
+Transparent pixels must remain transparent:
+
+Preserve the original alpha channel information.
+
+Do not fill transparent pixels with generated content or infer what might exist behind transparent regions.
+
+Do not reconstruct avatar features, anatomy, clothing, hair, or background in transparent areas.
+
+Do not use surrounding visual information to guess or generate missing content, or treat transparency as an indication that something needs restoration.
+
+Do not replace transparent regions with background information from the original image.An area that is transparent in the PNG must not receive invented visual content in the final composition.
+
+4.2. Black Pixel Preservation
+Completely black pixels and black regions must also be preserved exactly as represented in the PNG:
+
+Preserve black RGB values as black and do not interpret black regions as missing information.
+
+Do not replace black areas with inferred visual details, or attempt to reveal, reconstruct, or imagine information supposedly hidden behind black regions.
+
+Do not substitute black areas with background, avatar anatomy, clothing, hair, or other generated content.
+
+Do not automatically remove, recolor, or fill black regions.BLACK MEANS BLACK. BLACK PIXELS MUST NOT BE TREATED AS TRANSPARENT OR AS MISSING VISUAL INFORMATION.
+
+4.3. No Generative Reconstruction
+The final image must not contain any visual information invented to complete areas not explicitly represented in the source materials. Strictly prohibited:
+
+Hallucinating missing visual details or guessing what an obscured region might look like.
+
+Generating content behind transparent areas or reconstructing information hidden by black regions.
+
+Completing partially visible avatar features without explicit visual reference.
+
+Extrapolating anatomy, clothing, hair, or background details to make the image appear more complete.
+Only explicitly visible and authorized visual information may be integrated.
+
+4.4. Integration Requirements
+For explicitly visible and authorized PNG content:
+
+Reproduce its relevant visual features faithfully and integrate them into their corresponding locations.
+
+Maintain the original scene's perspective, proportions, lighting, colors, and textures.
+
+Ensure natural continuity only where explicitly authorized, preserving all original and PNG pixel information outside the specifically authorized modifications.
+
+5. Seamless AI Avatar Integration
+The replacement avatar face and reference hairstyle must integrate naturally with the original image. Match the original:
+
+Head position, scale, and perspective.
+
+Facial orientation and expression.
+
+Lighting direction, intensity, facial illumination, shadows, and highlights.
+
+Color temperature, exposure, and contrast.
+
+Rendering style, sharpness, texture, and visual fidelity.
+
+Ensure that the reference hairstyle fits naturally around the replacement avatar's face and head, with realistic hairline transitions and consistent lighting. Avoid visible blending boundaries, distorted facial features, artificial facial texture, inconsistent lighting, unnatural hair transitions, incorrect head proportions, or visible editing artifacts. Photographic or stylistic integration is authorized only within the modification regions and must never justify modifying unrelated pixels.
+
+6. Strict Modification Boundaries
+Only the following modifications are authorized:
+
+Replace the original AI avatar's facial identity with the facial identity of the reference AI avatar.
+
+Replace the original AI avatar's hairstyle with the exact hairstyle of the reference AI avatar.
+
+Integrate the specific visual information explicitly represented by the transparent PNG into its corresponding authorized locations.
+
+These modifications must be localized and must not affect unrelated image regions outside the face, hair, and authorized PNG areas. Do not expand the modification regions beyond what is strictly necessary, and do not use generative reconstruction as a substitute for missing source information.
+
+7. Final Output Requirements
+Produce a single high-quality image that retains the original composition and appearance, except for the explicitly authorized modifications:
+
+The original AI avatar has the facial identity of the reference AI avatar.
+
+The original AI avatar has the hairstyle of the reference AI avatar.
+
+The specific visual information represented by the PNG is integrated only where explicitly authorized.
+
+Transparent regions remain transparent and black regions remain black.
+
+No missing or obscured visual information is invented or reconstructed.
+
+All unrelated original visual elements, dimensions, resolution, and aspect ratio remain unchanged.
+
+8. ABSOLUTE FINAL INSTRUCTION: IMMUTABLE SOURCE PRESERVATION
+PRESERVE EVERYTHING. CHANGE ONLY THE AVATAR'S FACE, HAIRSTYLE, AND THE SPECIFIC DETAILS EXPLICITLY AUTHORIZED BY THE PNG.
+The first image is the immutable reference for the entire composition outside the face and hair. The reference images are the exclusive sources of BOTH the replacement AI avatar's facial identity AND hairstyle. The transparent PNG provides only the specific visual information explicitly represented by its actual pixel content.TRANSPARENCY MUST REMAIN TRANSPARENCY. BLACK MUST REMAIN BLACK. PIXEL PRESERVATION TAKES PRIORITY OVER VISUAL COMPLETENESS.DO NOT COMPLETE THE IMAGE. DO NOT FILL IN THE GAPS. DO NOT INVENT WHAT IS NOT PROVIDED. ONLY MAKE THE EXPLICITLY REQUESTED AVATAR MODIFICATIONS.
+Use head orientation from the first image and maintain head size consistent. Keep the lighting from the first image.

@@ -47,11 +47,35 @@
  *   maskSelectivity: number,
  *   protectFeatures: boolean,
  *   seamEqualizePx: number,
+ *   borderMatchStrength?: number,
+ *   borderMutualMeet?: boolean,
  *   tempOffset: number,
  *   tintOffset: number,
  *   lightOffset: number,
  *   satScale: number
  * }} SkinPostOptions
+ *
+ * @typedef {{
+ *   theme: string,
+ *   precisionDefaultMobile: boolean,
+ *   precisionSensitivity: number,
+ *   loupeZoom: number,
+ *   loupeSize: number,
+ *   autoSaveHistory: boolean
+ * }} AppSettings
+ *
+ * @typedef {{
+ *   id: string,
+ *   name: string,
+ *   status: 'in_progress' | 'completed',
+ *   activeStep: 1 | 2 | 3 | 4 | 5 | 6,
+ *   createdAt: number,
+ *   updatedAt: number,
+ *   width: number,
+ *   height: number,
+ *   thumbBlob: Blob | null,
+ *   meta: any
+ * }} StoredProjectMeta
  *
  * @typedef {{
  *   valid: boolean,

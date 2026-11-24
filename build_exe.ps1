@@ -201,6 +201,7 @@ $resArgs = @(
   "/resource:`"$(Join-Path $Root 'js\seamMerge.js')`",app.js.seamMerge.js",
   "/resource:`"$(Join-Path $Root 'js\skinMatch.js')`",app.js.skinMatch.js",
   "/resource:`"$(Join-Path $Root 'js\viewport.js')`",app.js.viewport.js",
+  "/resource:`"$(Join-Path $Root 'js\storage.js')`",app.js.storage.js",
   "/resource:`"$(Join-Path $Root 'js\app.js')`",app.js.app.js",
   "/resource:`"$IcoPath`",app.favicon.ico"
 )

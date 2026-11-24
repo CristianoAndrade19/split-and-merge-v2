@@ -84,6 +84,17 @@
       // Freehand cut/lasso stroke state
       /** @type {Point[]} */
       this.strokePts = [];
+      /** @type {number[]} */
+      this.strokeCheckpoints = [];
+      this.strokePaused = false;
+      this.precisionMode = false;
+      this.precisionSensitivity = 0.35;
+      this.loupeZoom = 3.0;
+      this.loupeSize = 132;
+      /** @type {Point | null} */
+      this.precisionCursorImg = null;
+      /** @type {Point | null} */
+      this._lastPrecisionScreen = null;
       this.strokePreview = { pIn: null, nearStart: false, startedOutsideOrBorder: false };
       this.dashOffset = 0;
       this.animFrameId = 0;
@@ -96,10 +107,126 @@
       this.alignStartAngle = 0;
 
       this._checkerPattern = null;
+      this._gridPattern = null;
       this._renderQueued = false;
       this._bindEvents();
       this._observeResize();
       this._draw();
+    }
+
+    /**
+     * Updates precision cut + magnifier loupe configuration.
+     * @param {{ enabled?: boolean, sensitivity?: number, loupeZoom?: number, loupeSize?: number }} [opts]
+     */
+    setPrecisionOptions(opts = {}) {
+      if (typeof opts.enabled === 'boolean') this.precisionMode = opts.enabled;
+      if (opts.sensitivity !== undefined) {
+        this.precisionSensitivity = Math.max(0.12, Math.min(1.0, Number(opts.sensitivity) || 0.35));
+      }
+      if (opts.loupeZoom !== undefined) {
+        this.loupeZoom = Math.max(1.5, Math.min(6.0, Number(opts.loupeZoom) || 3.0));
+      }
+      if (opts.loupeSize !== undefined) {
+        this.loupeSize = Math.max(96, Math.min(180, Number(opts.loupeSize) || 132));
+      }
+      this._notifyStrokeState();
+      this.requestRender();
+    }
+
+    hasActiveStroke() {
+      return this.strokePts.length > 0;
+    }
+
+    getStrokeState() {
+      return {
+        active: this.strokePts.length > 0,
+        paused: this.strokePaused,
+        segments: this.strokeCheckpoints.length,
+        points: this.strokePts.length,
+        precisionMode: this.precisionMode,
+      };
+    }
+
+    _notifyStrokeState() {
+      if (this.callbacks && typeof this.callbacks.onStrokeStateChange === 'function') {
+        this.callbacks.onStrokeStateChange(this.getStrokeState());
+      }
+    }
+
+    /**
+     * Undoes the most recent lifted segment (or clears the active stroke if single segment).
+     * Returns true if active stroke state was modified, false if no active stroke existed.
+     * @returns {boolean}
+     */
+    undoStrokeSegment() {
+      if (this.strokePts.length === 0) return false;
+      this.dragAction = 'none';
+      this.isPointerDown = false;
+      if (this.strokeCheckpoints.length > 1) {
+        const lastCp = /** @type {number} */ (this.strokeCheckpoints.pop());
+        this.strokePts = this.strokePts.slice(0, Math.max(1, lastCp));
+        this.precisionCursorImg = { ...this.strokePts[this.strokePts.length - 1] };
+        this.strokePaused = true;
+        const res = Geo.analyzeStrokeProgress(this.strokePts, this.docW, this.docH, this.zoom, false);
+        this.strokePreview = res.preview;
+      } else {
+        this.strokePts = [];
+        this.strokeCheckpoints = [];
+        this.precisionCursorImg = null;
+        this.strokePaused = false;
+        this.strokePreview = { pIn: null, nearStart: false, startedOutsideOrBorder: false };
+      }
+      this._stopDashAnimation();
+      this._notifyStrokeState();
+      this.requestRender();
+      return true;
+    }
+
+    cancelActiveStroke() {
+      this.dragAction = 'none';
+      this.isPointerDown = false;
+      this.strokePts = [];
+      this.strokeCheckpoints = [];
+      this.precisionCursorImg = null;
+      this.strokePaused = false;
+      this._lastPrecisionScreen = null;
+      this.strokePreview = { pIn: null, nearStart: false, startedOutsideOrBorder: false };
+      this._stopDashAnimation();
+      this._notifyStrokeState();
+      this.requestRender();
+    }
+
+    finishPrecisionLasso() {
+      if (this.strokePts.length < 3 || !this.docW || !this.docH) return false;
+      const res = Geo.analyzeStrokeProgress(this.strokePts, this.docW, this.docH, this.zoom, true);
+      let completed = res.completed;
+      if (!completed && this.strokePts.length >= 3) {
+        const poly = this.strokePts.concat([{ ...this.strokePts[0] }]);
+        if (Geo.polygonArea(poly) >= 16) {
+          completed = { type: 'lasso', polygon: poly, cutPath: poly };
+        }
+      }
+      if (completed && this.callbacks.onSelectionComplete) {
+        this.cancelActiveStroke();
+        this.callbacks.onSelectionComplete(completed);
+        return true;
+      }
+      return false;
+    }
+
+    _getGridPattern() {
+      if (this._gridPattern || !this.ctx) return this._gridPattern;
+      const step = 28;
+      const gCanvas = document.createElement('canvas');
+      gCanvas.width = step;
+      gCanvas.height = step;
+      const gCtx = gCanvas.getContext('2d');
+      if (gCtx) {
+        gCtx.fillStyle = 'rgba(148, 163, 184, 0.09)';
+        gCtx.fillRect(0, 0, 1.3, 1.3);
+        this._gridPattern = this.ctx.createPattern(gCanvas, 'repeat');
+      }
+      return this._gridPattern;
     }
 
     _getCheckerPattern() {
@@ -305,6 +432,10 @@
 
     _bindEvents() {
       this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+      this.canvas.addEventListener('selectstart', (e) => e.preventDefault());
+      this.canvas.addEventListener('gesturestart', (e) => e.preventDefault());
+      this.canvas.addEventListener('gesturechange', (e) => e.preventDefault());
+      this.canvas.addEventListener('dragstart', (e) => e.preventDefault());
 
       this.canvas.addEventListener(
         'wheel',
@@ -358,8 +489,17 @@
         // 2-finger pinch-to-zoom + simultaneous pan in ANY mode!
         if (this.activePointers.size === 2) {
           if (this.dragAction === 'stroke') {
-            this.strokePts = [];
-            this._stopDashAnimation();
+            if (this.precisionMode && this.strokePts.length > 0) {
+              // In precision mode, keep in-progress points paused so user can pinch-zoom and resume!
+              this.strokePaused = true;
+              this._stopDashAnimation();
+              this._notifyStrokeState();
+            } else {
+              this.strokePts = [];
+              this.strokeCheckpoints = [];
+              this._stopDashAnimation();
+              this._notifyStrokeState();
+            }
           } else if (
             (this.dragAction === 'align-move' ||
               this.dragAction === 'align-scale' ||
@@ -462,11 +602,29 @@
 
         if (this.mode === 'cut') {
           this.dragAction = 'stroke';
-          const imgPt = this.screenToImage(pos.x, pos.y);
-          this.strokePts = [imgPt];
+          if (this.precisionMode) {
+            if (this.strokePaused && this.precisionCursorImg && this.strokePts.length > 0) {
+              this.strokeCheckpoints.push(this.strokePts.length);
+              this.strokePaused = false;
+            } else {
+              const imgPt = this.screenToImage(pos.x, pos.y);
+              this.precisionCursorImg = { ...imgPt };
+              this.strokePts = [imgPt];
+              this.strokeCheckpoints = [0];
+              this.strokePaused = false;
+            }
+            this._lastPrecisionScreen = { x: pos.x, y: pos.y };
+          } else {
+            const imgPt = this.screenToImage(pos.x, pos.y);
+            this.strokePts = [imgPt];
+            this.strokeCheckpoints = [0];
+            this.strokePaused = false;
+            this.precisionCursorImg = null;
+          }
           const res = Geo.analyzeStrokeProgress(this.strokePts, this.docW, this.docH, this.zoom, false);
           this.strokePreview = res.preview;
           this._startDashAnimation();
+          this._notifyStrokeState();
           this.requestRender();
           return;
         }
@@ -584,10 +742,29 @@
         }
 
         if (this.dragAction === 'stroke') {
-          const imgPt = this.screenToImage(pos.x, pos.y);
+          let imgPt;
+          if (this.precisionMode && this._lastPrecisionScreen && this.precisionCursorImg) {
+            const dx = pos.x - this._lastPrecisionScreen.x;
+            const dy = pos.y - this._lastPrecisionScreen.y;
+            this._lastPrecisionScreen = { x: pos.x, y: pos.y };
+            const pad = Math.max(40, Math.min(this.docW, this.docH) * 0.28);
+            this.precisionCursorImg.x = Math.max(
+              -pad,
+              Math.min(this.docW + pad, this.precisionCursorImg.x + (dx * this.precisionSensitivity) / this.zoom)
+            );
+            this.precisionCursorImg.y = Math.max(
+              -pad,
+              Math.min(this.docH + pad, this.precisionCursorImg.y + (dy * this.precisionSensitivity) / this.zoom)
+            );
+            imgPt = { x: this.precisionCursorImg.x, y: this.precisionCursorImg.y };
+          } else {
+            imgPt = this.screenToImage(pos.x, pos.y);
+          }
+
           const last = this.strokePts[this.strokePts.length - 1];
-          // Sample points at >= 1.5 screen px spacing for smooth, clean curves
-          if (!last || Geo.dist(last, imgPt) * this.zoom >= 1.5) {
+          const minStep = this.precisionMode ? 0.85 : 1.5;
+          // Sample points at >= minStep screen px spacing for smooth, clean curves
+          if (!last || Geo.dist(last, imgPt) * this.zoom >= minStep) {
             this.strokePts.push(imgPt);
             const res = Geo.analyzeStrokeProgress(
               this.strokePts,
@@ -599,16 +776,23 @@
             this.strokePreview = res.preview;
 
             if (res.completed) {
-              // Selection immediately determined while holding mouse (touched 2 borders or closed lasso)!
+              // Selection immediately determined while holding pointer (touched 2 borders or closed lasso)!
               this.strokePts = [];
+              this.strokeCheckpoints = [];
+              this.strokePaused = false;
+              this.precisionCursorImg = null;
+              this._lastPrecisionScreen = null;
               this.dragAction = 'none';
               this._stopDashAnimation();
+              this._notifyStrokeState();
               if (this.callbacks.onSelectionComplete) {
                 this.callbacks.onSelectionComplete(res.completed);
               }
               this.requestRender();
               return;
             }
+            this.requestRender();
+          } else if (this.precisionMode) {
             this.requestRender();
           }
         }
@@ -643,26 +827,70 @@
             pos.x - this.dragStartScreen.x,
             pos.y - this.dragStartScreen.y
           );
-          if (movedScreen < 5 && this.strokePts.length <= 3) {
-            // Quick click on canvas -> allow clicking a region to inspect/select
-            const imgPt = this.screenToImage(pos.x, pos.y);
-            if (Geo.isInsideRect(imgPt, this.docW, this.docH) && this.callbacks.onRegionClick) {
-              this.callbacks.onRegionClick(imgPt);
+          if (this.precisionMode) {
+            if (
+              movedScreen < 4 &&
+              this.strokeCheckpoints.length <= 1 &&
+              this.strokePts.length <= 2
+            ) {
+              // Quick tap before moving in precision mode -> inspect region & reset stroke
+              const imgPt = this.screenToImage(pos.x, pos.y);
+              if (Geo.isInsideRect(imgPt, this.docW, this.docH) && this.callbacks.onRegionClick) {
+                this.callbacks.onRegionClick(imgPt);
+              }
+              this.strokePts = [];
+              this.strokeCheckpoints = [];
+              this.strokePaused = false;
+              this.precisionCursorImg = null;
+            } else {
+              const res = Geo.analyzeStrokeProgress(
+                this.strokePts,
+                this.docW,
+                this.docH,
+                this.zoom,
+                false
+              );
+              this.strokePreview = res.preview;
+              if (res.completed && this.callbacks.onSelectionComplete) {
+                this.strokePts = [];
+                this.strokeCheckpoints = [];
+                this.strokePaused = false;
+                this.precisionCursorImg = null;
+                this.callbacks.onSelectionComplete(res.completed);
+              } else {
+                // Keep paused so user can lift finger, inspect/zoom, and continue from where it stopped!
+                this.strokePaused = true;
+              }
             }
+            this._lastPrecisionScreen = null;
+            this._stopDashAnimation();
+            this._notifyStrokeState();
           } else {
-            const res = Geo.analyzeStrokeProgress(
-              this.strokePts,
-              this.docW,
-              this.docH,
-              this.zoom,
-              true
-            );
-            if (res.completed && this.callbacks.onSelectionComplete) {
-              this.callbacks.onSelectionComplete(res.completed);
+            if (movedScreen < 5 && this.strokePts.length <= 3) {
+              // Quick click on canvas -> allow clicking a region to inspect/select
+              const imgPt = this.screenToImage(pos.x, pos.y);
+              if (Geo.isInsideRect(imgPt, this.docW, this.docH) && this.callbacks.onRegionClick) {
+                this.callbacks.onRegionClick(imgPt);
+              }
+            } else {
+              const res = Geo.analyzeStrokeProgress(
+                this.strokePts,
+                this.docW,
+                this.docH,
+                this.zoom,
+                true
+              );
+              if (res.completed && this.callbacks.onSelectionComplete) {
+                this.callbacks.onSelectionComplete(res.completed);
+              }
             }
+            this.strokePts = [];
+            this.strokeCheckpoints = [];
+            this.strokePaused = false;
+            this.precisionCursorImg = null;
+            this._stopDashAnimation();
+            this._notifyStrokeState();
           }
-          this.strokePts = [];
-          this._stopDashAnimation();
         } else if (
           this.dragAction === 'align-move' ||
           this.dragAction === 'align-scale' ||
@@ -923,6 +1151,15 @@
         this._drawActiveStroke(ctx);
       }
 
+      if (
+        this.mode === 'cut' &&
+        this.precisionMode &&
+        this.precisionCursorImg &&
+        (this.dragAction === 'stroke' || this.strokePaused)
+      ) {
+        this._drawPrecisionLoupe(ctx, vw, vh);
+      }
+
       ctx.restore();
     }
 
@@ -954,14 +1191,15 @@
 
     _drawWorkspaceGrid(ctx, vw, vh) {
       const step = 28;
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
+      const pattern = this._getGridPattern();
+      if (!pattern) return;
       const offX = ((this.panX % step) + step) % step;
       const offY = ((this.panY % step) + step) % step;
-      for (let y = offY; y < vh; y += step) {
-        for (let x = offX; x < vw; x += step) {
-          ctx.fillRect(x, y, 1.2, 1.2);
-        }
-      }
+      ctx.save();
+      ctx.translate(offX, offY);
+      ctx.fillStyle = pattern;
+      ctx.fillRect(-step, -step, vw + step * 2, vh + step * 2);
+      ctx.restore();
     }
 
     /**
@@ -1384,6 +1622,176 @@
         ctx.strokeStyle = '#ffffff';
         ctx.stroke();
       }
+
+      ctx.restore();
+    }
+
+    _drawPrecisionLoupe(ctx, vw, vh) {
+      const cur = this.precisionCursorImg;
+      const primary = this.renderState.primaryCanvas;
+      if (!cur || !primary) return;
+
+      const sp = this.imageToScreen(cur.x, cur.y);
+      const diam = this.loupeSize || 132;
+      const r = diam * 0.5;
+      const offsetY = diam * 0.85;
+      let lx = Math.max(r + 12, Math.min(vw - r - 12, sp.x));
+      let ly = sp.y - offsetY;
+      if (ly < r + 52) {
+        ly = Math.min(vh - r - 16, sp.y + offsetY);
+      }
+
+      const loupeScale = Math.max(1.25, this.zoom * this.loupeZoom);
+      const isReadyAccent =
+        this.strokePreview.nearStart ||
+        (this.strokePreview.pIn &&
+          Geo.nearestPointOnBorder(cur, this.docW, this.docH).distance <= 3 / Math.max(0.2, this.zoom));
+
+      ctx.save();
+
+      // Pointer target reticle on main canvas
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = isReadyAccent ? '#34d399' : '#22d3ee';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Subtle tether line between cut tip and loupe
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.32)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(sp.x, sp.y);
+      ctx.lineTo(lx, ly);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Loupe outer drop shadow
+      ctx.save();
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = '#05070b';
+      ctx.beginPath();
+      ctx.arc(lx, ly, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Magnified interior inside circular clip
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(lx, ly, r - 1.5, 0, Math.PI * 2);
+      ctx.clip();
+
+      ctx.fillStyle = '#07090e';
+      ctx.fillRect(lx - r, ly - r, diam, diam);
+
+      ctx.save();
+      ctx.translate(lx, ly);
+      ctx.scale(loupeScale, loupeScale);
+      ctx.translate(-cur.x, -cur.y);
+
+      ctx.imageSmoothingEnabled = loupeScale < 3.5;
+      ctx.imageSmoothingQuality = 'high';
+
+      ctx.fillStyle = '#121722';
+      ctx.fillRect(0, 0, this.docW, this.docH);
+      ctx.drawImage(primary, 0, 0, this.docW, this.docH);
+      if (this.renderState.showMaskOverlay && this.renderState.maskOverlayCanvas) {
+        ctx.drawImage(this.renderState.maskOverlayCanvas, 0, 0, this.docW, this.docH);
+      }
+
+      // Crisp border outline of document inside loupe
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.lineWidth = 1 / loupeScale;
+      ctx.strokeRect(0, 0, this.docW, this.docH);
+      ctx.restore();
+
+      // Active cut path inside loupe
+      if (this.strokePts.length > 0) {
+        ctx.beginPath();
+        const p0x = lx + (this.strokePts[0].x - cur.x) * loupeScale;
+        const p0y = ly + (this.strokePts[0].y - cur.y) * loupeScale;
+        ctx.moveTo(p0x, p0y);
+        for (let i = 1; i < this.strokePts.length; i++) {
+          ctx.lineTo(
+            lx + (this.strokePts[i].x - cur.x) * loupeScale,
+            ly + (this.strokePts[i].y - cur.y) * loupeScale
+          );
+        }
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+
+        ctx.strokeStyle = isReadyAccent ? '#34d399' : '#22d3ee';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Start point circle inside loupe
+        ctx.beginPath();
+        ctx.arc(p0x, p0y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = this.strokePreview.nearStart ? '#34d399' : '#22d3ee';
+        ctx.fill();
+      }
+
+      // Precision center crosshair
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(lx - 11, ly); ctx.lineTo(lx - 3, ly);
+      ctx.moveTo(lx + 3, ly); ctx.lineTo(lx + 11, ly);
+      ctx.moveTo(lx, ly - 11); ctx.lineTo(lx, ly - 3);
+      ctx.moveTo(lx, ly + 3); ctx.lineTo(lx, ly + 11);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(lx - 11, ly); ctx.lineTo(lx - 3, ly);
+      ctx.moveTo(lx + 3, ly); ctx.lineTo(lx + 11, ly);
+      ctx.moveTo(lx, ly - 11); ctx.lineTo(lx, ly - 3);
+      ctx.moveTo(lx, ly + 3); ctx.lineTo(lx, ly + 11);
+      ctx.stroke();
+
+      ctx.fillStyle = isReadyAccent ? '#34d399' : '#22d3ee';
+      ctx.beginPath();
+      ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore(); // end circular clip
+
+      // Loupe bezel ring
+      ctx.strokeStyle = isReadyAccent ? '#34d399' : 'rgba(255, 255, 255, 0.72)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(lx, ly, r, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Status caption chip directly under/above loupe
+      const chipY = ly + r + 13 < vh - 12 ? ly + r + 13 : ly - r - 13;
+      const statusText = this.strokePaused
+        ? `PAUSADO (${this.loupeZoom.toFixed(1)}×) • Arraste p/ continuar`
+        : `${this.loupeZoom.toFixed(1)}× PRECISÃO`;
+      ctx.font = '600 10.5px system-ui, -apple-system, Segoe UI, sans-serif';
+      const tw = ctx.measureText(statusText).width + 16;
+      ctx.fillStyle = 'rgba(5, 7, 11, 0.9)';
+      ctx.strokeStyle = isReadyAccent ? '#34d399' : 'rgba(255, 255, 255, 0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(lx - tw * 0.5, chipY - 10, tw, 20, 999);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = isReadyAccent ? '#6ee7b7' : '#e2e8f0';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(statusText, lx, chipY + 0.5);
 
       ctx.restore();
     }
