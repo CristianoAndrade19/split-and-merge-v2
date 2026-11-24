@@ -19,7 +19,12 @@
  *   img: HTMLImageElement | HTMLCanvasElement,
  *   width: number,
  *   height: number,
- *   name: string
+ *   name: string,
+ *   _diskBytes?: { data: ArrayBuffer, type: string } | null,
+ *   _wasDownscaled?: boolean,
+ *   _origWidth?: number,
+ *   _origHeight?: number,
+ *   _cachedBlob?: Blob | null
  * }} LoadedImage
  *
  * @typedef {'none' | 'feather' | 'multiband' | 'poisson' | 'lab_skin' | 'luma_chroma' | 'edge_aware'} FinalMergeMode
@@ -61,7 +66,9 @@
  *   precisionSensitivity: number,
  *   loupeZoom: number,
  *   loupeSize: number,
- *   autoSaveHistory: boolean
+ *   autoSaveHistory: boolean,
+ *   mobileMaxEdge?: number,
+ *   settingsVersion?: number
  * }} AppSettings
  *
  * @typedef {{
@@ -73,7 +80,8 @@
  *   updatedAt: number,
  *   width: number,
  *   height: number,
- *   thumbBlob: Blob | null,
+ *   thumbBlob?: Blob | null,
+ *   thumbBytes?: { data: ArrayBuffer, type: string } | null,
  *   meta: any
  * }} StoredProjectMeta
  *

@@ -25,6 +25,8 @@
     { id: 'obsidian-mono', name: 'Preto + Prata', sub: 'Minimalista Puro', accent: '#f4f4f5', accent2: '#a1a1aa', themeColor: '#000000' },
   ];
 
+  const ACTIVE_PROJECT_KEY = 'sm_active_project_id';
+
   /** @type {AppSettings & { settingsVersion?: number }} */
   const DEFAULT_SETTINGS = {
     theme: 'obsidian-cyan',
@@ -33,7 +35,8 @@
     loupeZoom: 3.0,
     loupeSize: 132,
     autoSaveHistory: true,
-    settingsVersion: 2,
+    mobileMaxEdge: 2048,
+    settingsVersion: 3,
   };
 
   function generateProjectId() {
@@ -245,6 +248,15 @@
   function setStateCanvas(key, nextCanvas) {
     const prev = /** @type {HTMLCanvasElement | null} */ (state[key]);
     if (prev && prev !== nextCanvas && prev !== state.img1Canvas && prev !== state.imgFinalUnblendedCanvas) {
+      try {
+        if (viewport && viewport.renderState) {
+          const rs = viewport.renderState;
+          if (rs.primaryCanvas === prev) rs.primaryCanvas = null;
+          if (rs.onionCanvas === prev) rs.onionCanvas = null;
+          if (rs.maskOverlayCanvas === prev) rs.maskOverlayCanvas = null;
+          if (rs.compareBeforeCanvas === prev) rs.compareBeforeCanvas = null;
+        }
+      } catch (_) {}
       Ops.releaseCanvas(prev);
     }
     // @ts-ignore - controlled canvas state keys
@@ -305,6 +317,18 @@
 
   function isMobileLayout() {
     return window.matchMedia && window.matchMedia('(max-width: 960px)').matches;
+  }
+
+  function isLowMemMobile() {
+    return isMobileLayout() || !!(Ops.isIOSDevice && Ops.isIOSDevice());
+  }
+
+  function getImportLoadOptions() {
+    const maxEdge =
+      isLowMemMobile() && Number(state.appSettings.mobileMaxEdge) > 0
+        ? Number(state.appSettings.mobileMaxEdge)
+        : 0;
+    return maxEdge > 0 ? { maxEdge } : {};
   }
 
   function isRemoteClient() {
@@ -437,6 +461,7 @@
   }
 
   function handleEmptyCanvasClick() {
+    if (isLowMemMobile()) pruneMemoryForStep(state.activeStep);
     if (state.activeStep === 1) {
       fileInputImg1.click();
     } else if (state.activeStep === 2) {
@@ -539,26 +564,284 @@
   // Lazy Pipeline Recomputation (Zero Lag Under Continuous Editing)
   // ===========================================================================
 
+  function ensureEdt1() {
+    if (!state.img1Canvas || !state.faceMask1) return;
+    const W = state.img1Canvas.width;
+    const H = state.img1Canvas.height;
+    if (!state.edtFace1OutSq) {
+      state.edtFace1OutSq = Geo.computeEDT2DSq(state.faceMask1, 1, W, H);
+    }
+    if (!state.edtFace1InSq) {
+      state.edtFace1InSq = Geo.computeEDT2DSq(state.faceMask1, 0, W, H);
+    }
+  }
+
+  function ensureCustomEdt() {
+    if (!state.img1Canvas || !state.customRawMask2) return;
+    if (state.edtCustomOutSq && state.edtCustomInSq) return;
+    const W = state.img1Canvas.width;
+    const H = state.img1Canvas.height;
+    const normCustom = new Uint8Array(W * H);
+    const want = state.customFaceIsOne2 ? 1 : 0;
+    for (let i = 0; i < normCustom.length; i++) {
+      normCustom[i] = state.customRawMask2[i] === want ? 1 : 0;
+    }
+    state.edtCustomOutSq = Geo.computeEDT2DSq(normCustom, 1, W, H);
+    state.edtCustomInSq = Geo.computeEDT2DSq(normCustom, 0, W, H);
+  }
+
+  function restoreStep1DisplayCanvases(includeFaceBody = true, includeOverlay = true) {
+    if (!state.img1Canvas || !state.faceMask1) return;
+    const W = state.img1Canvas.width;
+    const H = state.img1Canvas.height;
+    if (includeFaceBody) {
+      if (!state.face1Canvas) {
+        setStateCanvas('face1Canvas', Ops.isolateByMask(state.img1Canvas, state.faceMask1, 1));
+      }
+      if (!state.corpo1Canvas) {
+        setStateCanvas('corpo1Canvas', Ops.isolateByMask(state.img1Canvas, state.faceMask1, 0));
+      }
+    }
+    if (includeOverlay && !state.mask1OverlayCanvas) {
+      setStateCanvas(
+        'mask1OverlayCanvas',
+        Ops.createMaskOverlayCanvas(state.faceMask1, W, H, {
+          tintOne: [56, 189, 248, 46],
+          tintZero: [245, 158, 11, 28],
+          borderColor: [56, 189, 248, 250],
+          borderThickness: 2,
+        })
+      );
+    }
+  }
+
   /**
-   * Ensures all dirty prerequisite steps up to `targetStep` are freshly computed.
+   * Releases heavy GPU canvases & Float32 EDT buffers not needed by `targetStep`,
+   * keeping active RAM low on iOS Safari while preserving masks & loaded source images
+   * so any previous step regenerates transparently on demand.
+   * @param {number} targetStep
+   */
+  function pruneMemoryForStep(targetStep) {
+    let released = 0;
+    const dropCanvas = (key) => {
+      if (state[key]) {
+        setStateCanvas(key, null);
+        released++;
+      }
+    };
+
+    if (targetStep === 1) {
+      dropCanvas('img2AlignedCanvas');
+      dropCanvas('face2Canvas');
+      dropCanvas('imgMergeCanvas');
+      dropCanvas('faceImprecisaCanvas');
+      dropCanvas('corpoSemBordasCanvas');
+      dropCanvas('mergeOverlayCanvas');
+      dropCanvas('refinedAlignedCanvas');
+      dropCanvas('facePrecisaCanvas');
+      dropCanvas('imgFinalUnblendedCanvas');
+      dropCanvas('imgFinalCanvas');
+      dropCanvas('imgPostCanvas');
+      dropCanvas('skinMaskPreviewCanvas');
+      state.edtMergeInsideSq = null;
+    } else if (targetStep === 2) {
+      dropCanvas('face1Canvas');
+      dropCanvas('corpo1Canvas');
+      dropCanvas('imgMergeCanvas');
+      dropCanvas('faceImprecisaCanvas');
+      dropCanvas('corpoSemBordasCanvas');
+      dropCanvas('mergeOverlayCanvas');
+      dropCanvas('refinedAlignedCanvas');
+      dropCanvas('facePrecisaCanvas');
+      dropCanvas('imgFinalUnblendedCanvas');
+      dropCanvas('imgFinalCanvas');
+      dropCanvas('imgPostCanvas');
+      dropCanvas('skinMaskPreviewCanvas');
+      state.edtFace1OutSq = null;
+      state.edtFace1InSq = null;
+      state.edtMergeInsideSq = null;
+    } else if (targetStep === 3) {
+      dropCanvas('face1Canvas');
+      dropCanvas('corpo1Canvas');
+      dropCanvas('mask1OverlayCanvas');
+      dropCanvas('img2AlignedCanvas');
+      dropCanvas('face2Canvas');
+      dropCanvas('refinedAlignedCanvas');
+      dropCanvas('facePrecisaCanvas');
+      dropCanvas('imgFinalUnblendedCanvas');
+      dropCanvas('imgFinalCanvas');
+      dropCanvas('imgPostCanvas');
+      dropCanvas('skinMaskPreviewCanvas');
+      state.edtMergeInsideSq = null;
+    } else if (targetStep === 4) {
+      dropCanvas('face1Canvas');
+      dropCanvas('corpo1Canvas');
+      dropCanvas('mask1OverlayCanvas');
+      dropCanvas('img2AlignedCanvas');
+      dropCanvas('face2Canvas');
+      if (state.imgRefined && state.refinedAlignedCanvas) {
+        dropCanvas('faceImprecisaCanvas');
+      }
+      dropCanvas('imgFinalUnblendedCanvas');
+      dropCanvas('imgFinalCanvas');
+      dropCanvas('imgPostCanvas');
+      dropCanvas('skinMaskPreviewCanvas');
+      state.edtFace1OutSq = null;
+      state.edtFace1InSq = null;
+      state.edtCustomOutSq = null;
+      state.edtCustomInSq = null;
+      state.edtMergeInsideSq = null;
+    } else if (targetStep === 5) {
+      dropCanvas('face1Canvas');
+      dropCanvas('corpo1Canvas');
+      dropCanvas('mask1OverlayCanvas');
+      dropCanvas('img2AlignedCanvas');
+      dropCanvas('face2Canvas');
+      dropCanvas('imgMergeCanvas');
+      dropCanvas('faceImprecisaCanvas');
+      dropCanvas('mergeOverlayCanvas');
+      dropCanvas('refinedAlignedCanvas');
+      dropCanvas('imgPostCanvas');
+      dropCanvas('skinMaskPreviewCanvas');
+      state.edtFace1OutSq = null;
+      state.edtCustomOutSq = null;
+      state.edtCustomInSq = null;
+    } else if (targetStep === 6) {
+      dropCanvas('face1Canvas');
+      dropCanvas('corpo1Canvas');
+      dropCanvas('mask1OverlayCanvas');
+      dropCanvas('img2AlignedCanvas');
+      dropCanvas('face2Canvas');
+      dropCanvas('imgMergeCanvas');
+      dropCanvas('faceImprecisaCanvas');
+      dropCanvas('corpoSemBordasCanvas');
+      dropCanvas('mergeOverlayCanvas');
+      dropCanvas('refinedAlignedCanvas');
+      dropCanvas('facePrecisaCanvas');
+      state.edtFace1OutSq = null;
+      state.edtFace1InSq = null;
+      state.edtCustomOutSq = null;
+      state.edtCustomInSq = null;
+    }
+    return released;
+  }
+
+  /**
+   * Ensures all dirty or pruned prerequisite steps up to `targetStep` are freshly computed,
+   * automatically pruning earlier transient canvases on mobile between stages so peak RAM stays minimal.
    * @param {number} targetStep
    */
   function ensureStepComputed(targetStep) {
-    if (targetStep >= 2 && dirtySteps[2]) {
-      recomputeStep2Outputs();
+    const mobileMem = isLowMemMobile();
+
+    if (targetStep === 1 && state.faceMask1) {
+      restoreStep1DisplayCanvases(true, true);
     }
-    if (targetStep >= 3 && dirtySteps[3]) {
-      recomputeStep3Outputs(dirtySteps.step3RebuildBase);
+
+    if (targetStep >= 2) {
+      if (state.faceMask1 && targetStep === 2) {
+        restoreStep1DisplayCanvases(true, true);
+      }
+      const needStep2 =
+        dirtySteps[2] ||
+        (!!state.img2 && (!state.img2AlignedCanvas || (!!state.faceMask1 && !state.face2Canvas)));
+      const needStep3ForTarget =
+        targetStep >= 3 &&
+        (dirtySteps[3] ||
+          (!!state.img2 &&
+            !!state.faceMask1 &&
+            (!state.imgMergeCanvas ||
+              !state.mergeFaceMask ||
+              !state.corpoSemBordasCanvas ||
+              !state.mergeOverlayCanvas ||
+              (targetStep === 3 && !state.faceImprecisaCanvas) ||
+              (targetStep === 4 && !state.imgRefined && !state.faceImprecisaCanvas))));
+
+      if (needStep2 && (targetStep === 2 || needStep3ForTarget)) {
+        recomputeStep2Outputs(dirtySteps[2]);
+      } else if (needStep2 && targetStep > 2 && !needStep3ForTarget) {
+        dirtySteps[2] = true;
+      }
     }
-    if (targetStep >= 4 && dirtySteps[4]) {
-      recomputeStep4Outputs();
+
+    if (targetStep >= 3) {
+      const needStep3 =
+        dirtySteps[3] ||
+        (!!state.img2 &&
+          !!state.faceMask1 &&
+          (!state.imgMergeCanvas ||
+            !state.mergeFaceMask ||
+            !state.corpoSemBordasCanvas ||
+            !state.mergeOverlayCanvas ||
+            (targetStep === 3 && !state.faceImprecisaCanvas) ||
+            (targetStep === 4 && !state.imgRefined && !state.faceImprecisaCanvas)));
+
+      if (needStep3) {
+        if (!state.corpo1Canvas && state.faceMask1) {
+          setStateCanvas('corpo1Canvas', Ops.isolateByMask(state.img1Canvas, state.faceMask1, 0));
+        }
+        if (!state.face2Canvas && state.img2 && state.faceMask1) {
+          recomputeStep2Outputs(false);
+        }
+        if (state.mergeRegionMode === 'custom' && state.customRawMask2) {
+          ensureCustomEdt();
+        } else {
+          ensureEdt1();
+        }
+        const rebuildBase = dirtySteps.step3RebuildBase || !state.imgMergeCanvas;
+        recomputeStep3Outputs(rebuildBase, dirtySteps[3]);
+      }
+      if (mobileMem && targetStep >= 4) {
+        pruneMemoryForStep(4);
+      }
     }
-    if (targetStep >= 5 && dirtySteps[5]) {
-      recomputeStep5Outputs();
+
+    if (targetStep >= 4) {
+      const needStep4 =
+        dirtySteps[4] ||
+        (!!state.imgRefined && (!state.refinedAlignedCanvas || !state.facePrecisaCanvas));
+      if (needStep4) {
+        recomputeStep4Outputs(dirtySteps[4]);
+      }
+      if (mobileMem && targetStep >= 5) {
+        pruneMemoryForStep(5);
+      }
     }
-    if (targetStep >= 6 && dirtySteps[6]) {
-      recomputeStep6Outputs();
+
+    if (targetStep >= 5) {
+      const needStep5 =
+        dirtySteps[5] ||
+        (!!state.imgRefined && (!state.imgFinalCanvas || !state.imgFinalUnblendedCanvas));
+      if (needStep5) {
+        recomputeStep5Outputs(dirtySteps[5]);
+      }
     }
+
+    if (targetStep >= 6) {
+      const needStep6 =
+        dirtySteps[6] ||
+        (!!state.imgFinalCanvas && (!state.imgPostCanvas || !state.skinMaskPreviewCanvas));
+      if (needStep6) {
+        recomputeStep6Outputs();
+      }
+      if (mobileMem) {
+        pruneMemoryForStep(6);
+      }
+    }
+  }
+
+  /**
+   * Unified step navigation: computes prerequisites on demand, prunes inactive mobile memory,
+   * updates UI, and schedules disk checkpoint.
+   * @param {1 | 2 | 3 | 4 | 5 | 6} stepNum
+   */
+  function navigateToStep(stepNum) {
+    if (state.activeView !== 'studio') setActiveView('studio');
+    state.activeStep = stepNum;
+    ensureStepComputed(stepNum);
+    if (isLowMemMobile()) pruneMemoryForStep(stepNum);
+    syncAllUI();
+    scheduleAutoSaveProject(500);
   }
 
   let _liveRafId = 0;
@@ -577,9 +860,9 @@
 
   /**
    * Recomputes faceMask1, EDT fields, and isolated pieces of imagem1.
-   * Marks downstream Steps 2..6 dirty for lazy computation instead of blocking current frame.
+   * Marks downstream Steps 2..6 dirty when `markDownstream` is true.
    */
-  function recomputeStep1Outputs(recomputeEDT = true) {
+  function recomputeStep1Outputs(recomputeEDT = true, markDownstream = true) {
     if (!state.img1Canvas || !state.rawMask1) {
       state.faceMask1 = null;
       state.edtFace1OutSq = null;
@@ -587,7 +870,7 @@
       setStateCanvas('corpo1Canvas', null);
       setStateCanvas('face1Canvas', null);
       setStateCanvas('mask1OverlayCanvas', null);
-      markDirtyFrom(2, true);
+      if (markDownstream) markDirtyFrom(2, true);
       return;
     }
 
@@ -621,19 +904,19 @@
     state.faceCentroid1 = Geo.computeMaskCentroid(faceMask, 1, W, H);
     state.bodyCentroid1 = Geo.computeMaskCentroid(faceMask, 0, W, H);
 
-    markDirtyFrom(2, true);
+    if (markDownstream) markDirtyFrom(2, true);
   }
 
   /**
    * Recomputes normalized/padded imagem2 and its isolated Face using the SAME selection & role from imagem1.
    */
-  function recomputeStep2Outputs() {
+  function recomputeStep2Outputs(markDownstream = true) {
     dirtySteps[2] = false;
     if (!state.img1Canvas || !state.img2) {
       setStateCanvas('img2AlignedCanvas', null);
       state.img2Placement = null;
       setStateCanvas('face2Canvas', null);
-      markDirtyFrom(3, true);
+      if (markDownstream) markDirtyFrom(3, true);
       return;
     }
 
@@ -657,7 +940,7 @@
       setStateCanvas('face2Canvas', null);
     }
 
-    markDirtyFrom(3, true);
+    if (markDownstream) markDirtyFrom(3, true);
   }
 
   /**
@@ -666,8 +949,9 @@
    * - (corpo sem bordas imprecisas)
    *
    * @param {boolean} [rebuildMergeBase=true]
+   * @param {boolean} [markDownstream=true]
    */
-  function recomputeStep3Outputs(rebuildMergeBase = true) {
+  function recomputeStep3Outputs(rebuildMergeBase = true, markDownstream = true) {
     dirtySteps[3] = false;
     dirtySteps.step3RebuildBase = false;
     if (!state.img1Canvas || !state.corpo1Canvas || !state.face2Canvas || !state.faceMask1) {
@@ -678,7 +962,7 @@
       setStateCanvas('faceImprecisaCanvas', null);
       setStateCanvas('corpoSemBordasCanvas', null);
       setStateCanvas('mergeOverlayCanvas', null);
-      markDirtyFrom(4);
+      if (markDownstream) markDirtyFrom(4);
       return;
     }
 
@@ -696,6 +980,7 @@
     let mMask = null;
 
     if (state.mergeRegionMode === 'expand') {
+      ensureEdt1();
       if (state.edtFace1OutSq) {
         mMask = Geo.dilateMaskWithEDT(
           state.faceMask1,
@@ -712,6 +997,9 @@
         for (let i = 0; i < n; i++) {
           baseCustom[i] = state.customRawMask2[i] === want ? 1 : 0;
         }
+        if (state.customExtraExpandPx !== 0) {
+          ensureCustomEdt();
+        }
         if (state.customExtraExpandPx !== 0 && state.edtCustomOutSq) {
           mMask = Geo.dilateMaskWithEDT(
             baseCustom,
@@ -722,7 +1010,7 @@
         } else {
           mMask = baseCustom;
         }
-      } else if (state.edtFace1OutSq) {
+      } else {
         mMask = new Uint8Array(state.faceMask1);
       }
     }
@@ -735,7 +1023,7 @@
       setStateCanvas('mergeOverlayCanvas', null);
       state.mergeFaceBox = null;
       state.edtMergeInsideSq = null;
-      markDirtyFrom(4);
+      if (markDownstream) markDirtyFrom(4);
       return;
     }
 
@@ -757,19 +1045,19 @@
     state.mergeBodyCentroid = Geo.computeMaskCentroid(mMask, 0, W, H);
     state.edtMergeInsideSq = null;
 
-    markDirtyFrom(4);
+    if (markDownstream) markDirtyFrom(4);
   }
 
   /**
    * Recomputes aligned AI-refined face image and isolates (face + bordas precisas).
    */
-  function recomputeStep4Outputs() {
+  function recomputeStep4Outputs(markDownstream = true) {
     dirtySteps[4] = false;
     if (!state.img1Canvas || !state.mergeFaceMask || !state.imgRefined) {
       setStateCanvas('refinedAlignedCanvas', null);
       state.refinedPlacement = null;
       setStateCanvas('facePrecisaCanvas', null);
-      markDirtyFrom(5);
+      if (markDownstream) markDirtyFrom(5);
       return;
     }
 
@@ -791,14 +1079,14 @@
     state.refinedPlacement = placement;
     setStateCanvas('facePrecisaCanvas', Ops.isolateByMask(canvas, state.mergeFaceMask, 1));
 
-    markDirtyFrom(5);
+    if (markDownstream) markDirtyFrom(5);
   }
 
   /**
    * Recomputes imagemFinal = (face + bordas precisas) + (corpo sem bordas imprecisas)
    * with the selected seam & skin-tone merge technique.
    */
-  function recomputeStep5Outputs() {
+  function recomputeStep5Outputs(markDownstream = true) {
     dirtySteps[5] = false;
     if (
       !state.facePrecisaCanvas ||
@@ -808,7 +1096,7 @@
     ) {
       setStateCanvas('imgFinalUnblendedCanvas', null);
       setStateCanvas('imgFinalCanvas', null);
-      markDirtyFrom(6);
+      if (markDownstream) markDirtyFrom(6);
       return;
     }
 
@@ -824,17 +1112,18 @@
 
     if (!needsAdvanced) {
       setStateCanvas('imgFinalCanvas', unblended);
-      markDirtyFrom(6);
+      if (markDownstream) markDirtyFrom(6);
       return;
     }
 
+    const W = state.img1Canvas.width;
+    const H = state.img1Canvas.height;
+
     if (!state.edtMergeInsideSq) {
-      state.edtMergeInsideSq = Geo.computeEDT2DSq(
-        state.mergeFaceMask,
-        0,
-        state.img1Canvas.width,
-        state.img1Canvas.height
-      );
+      state.edtMergeInsideSq = Geo.computeEDT2DSq(state.mergeFaceMask, 0, W, H);
+    }
+    if (fm.protectCoreFace && !state.edtFace1InSq && state.faceMask1) {
+      state.edtFace1InSq = Geo.computeEDT2DSq(state.faceMask1, 0, W, H);
     }
 
     setStateCanvas(
@@ -852,7 +1141,7 @@
       })
     );
 
-    markDirtyFrom(6);
+    if (markDownstream) markDirtyFrom(6);
   }
 
   /**
@@ -896,39 +1185,7 @@
    * Releases inactive intermediate GPU canvases to keep continuous sessions light on RAM/VRAM.
    */
   function freeInactiveMemory() {
-    const s = state.activeStep;
-    let released = 0;
-    const drop = (key, stepNum) => {
-      if (state[key] && s !== stepNum) {
-        setStateCanvas(key, null);
-        dirtySteps[stepNum] = true;
-        released++;
-      }
-    };
-    if (s !== 2) {
-      drop('img2AlignedCanvas', 2);
-      drop('face2Canvas', 2);
-    }
-    if (s !== 3 && s !== 4) {
-      drop('imgMergeCanvas', 3);
-      drop('faceImprecisaCanvas', 3);
-      drop('corpoSemBordasCanvas', 3);
-      drop('mergeOverlayCanvas', 3);
-      dirtySteps.step3RebuildBase = true;
-    }
-    if (s !== 4 && s !== 5) {
-      drop('refinedAlignedCanvas', 4);
-      drop('facePrecisaCanvas', 4);
-    }
-    if (s !== 5 && s !== 6) {
-      drop('imgFinalUnblendedCanvas', 5);
-      drop('imgFinalCanvas', 5);
-    }
-    if (s !== 6) {
-      drop('imgPostCanvas', 6);
-      drop('skinMaskPreviewCanvas', 6);
-    }
-    return released;
+    return pruneMemoryForStep(state.activeStep);
   }
 
   /**
@@ -1205,9 +1462,14 @@
       viewport.setDocumentSize(loaded.width, loaded.height, true);
       recomputeStep1Outputs(true);
       state.activeStep = 1;
+      if (isLowMemMobile()) pruneMemoryForStep(1);
       syncAllUI();
-      scheduleAutoSaveProject();
-      showToast(`imagem1 carregada (${loaded.width} × ${loaded.height} px).`);
+      scheduleAutoSaveProject(500);
+      showToast(
+        loaded._wasDownscaled
+          ? `imagem1 otimizada (${loaded._origWidth}×${loaded._origHeight} → ${loaded.width}×${loaded.height} px) para evitar travamento no mobile.`
+          : `imagem1 carregada (${loaded.width} × ${loaded.height} px).`
+      );
     } else if (targetSlot === 2) {
       if (!state.img1Canvas) {
         showToast('Importe primeiro a imagem1 na Etapa 1 para definir a proporção base.', true);
@@ -1220,14 +1482,17 @@
       state.step2View = 'align';
       recomputeStep2Outputs();
       state.activeStep = 2;
+      if (isLowMemMobile()) pruneMemoryForStep(2);
       syncAllUI();
-      scheduleAutoSaveProject();
+      scheduleAutoSaveProject(500);
 
       const sameRatio =
         Math.abs(loaded.width / loaded.height - state.img1Canvas.width / state.img1Canvas.height) <
         0.004;
       showToast(
-        sameRatio
+        loaded._wasDownscaled
+          ? `imagem2 otimizada (${loaded._origWidth}×${loaded._origHeight} → ${loaded.width}×${loaded.height} px) no mobile!`
+          : sameRatio
           ? `imagem2 carregada (${loaded.width} × ${loaded.height} px) — mesma proporção!`
           : `imagem2 carregada (${loaded.width} × ${loaded.height} px) — centralizada com padding transparente!`
       );
@@ -1259,12 +1524,18 @@
         state.refinedTargetMode = 'full';
       }
 
+      if (isLowMemMobile()) pruneMemoryForStep(4);
       state.step4View = 'align';
       recomputeStep4Outputs();
       state.activeStep = 4;
+      if (isLowMemMobile()) pruneMemoryForStep(4);
       syncAllUI();
-      scheduleAutoSaveProject();
-      showToast('Resultado da IA (face + bordas precisas) importado!');
+      scheduleAutoSaveProject(500);
+      showToast(
+        loaded._wasDownscaled
+          ? `Resultado da IA otimizado para ${loaded.width}×${loaded.height} px (mobile estável)!`
+          : 'Resultado da IA (face + bordas precisas) importado!'
+      );
     }
   }
 
@@ -1286,7 +1557,7 @@
     fileInputImg1.value = '';
     if (!f) return;
     try {
-      const loaded = await Ops.loadImageFromBlob(f, f.name);
+      const loaded = await Ops.loadImageFromBlob(f, f.name, getImportLoadOptions());
       applyLoadedImage(loaded, 1);
     } catch (err) {
       showToast(err.message || 'Erro ao abrir imagem1.', true);
@@ -1298,7 +1569,7 @@
     fileInputImg2.value = '';
     if (!f) return;
     try {
-      const loaded = await Ops.loadImageFromBlob(f, f.name);
+      const loaded = await Ops.loadImageFromBlob(f, f.name, getImportLoadOptions());
       applyLoadedImage(loaded, 2);
     } catch (err) {
       showToast(err.message || 'Erro ao abrir imagem2.', true);
@@ -1310,7 +1581,7 @@
     fileInputRefined.value = '';
     if (!f) return;
     try {
-      const loaded = await Ops.loadImageFromBlob(f, f.name);
+      const loaded = await Ops.loadImageFromBlob(f, f.name, getImportLoadOptions());
       applyLoadedImage(loaded, 4);
     } catch (err) {
       showToast(err.message || 'Erro ao abrir imagem refinada.', true);
@@ -1320,7 +1591,7 @@
   // Global Ctrl+V Paste listener
   window.addEventListener('paste', async (e) => {
     try {
-      const loaded = await Ops.extractImageFromPasteEvent(e);
+      const loaded = await Ops.extractImageFromPasteEvent(e, getImportLoadOptions());
       if (loaded) {
         e.preventDefault();
         applyLoadedImage(loaded, currentImportSlot());
@@ -1344,7 +1615,7 @@
     const files = e.dataTransfer ? Array.from(e.dataTransfer.files).filter((x) => x.type.startsWith('image/')) : [];
     if (files.length === 0) return;
     try {
-      const loaded = await Ops.loadImageFromBlob(files[0], files[0].name);
+      const loaded = await Ops.loadImageFromBlob(files[0], files[0].name, getImportLoadOptions());
       applyLoadedImage(loaded, currentImportSlot());
     } catch (err) {
       showToast(err.message || 'Falha ao soltar imagem.', true);
@@ -1701,10 +1972,7 @@
         }
       }
       btn.addEventListener('click', () => {
-        if (state.activeView !== 'studio') setActiveView('studio');
-        state.activeStep = s.id;
-        ensureStepComputed(s.id);
-        syncAllUI();
+        navigateToStep(s.id);
       });
       stepperNav.appendChild(btn);
 
@@ -1919,6 +2187,7 @@
       });
       addPill('↔ vs imagemMerge', state.step5View === 'compare-merge', () => {
         state.step5View = 'compare-merge';
+        if (!state.imgMergeCanvas && state.img2 && state.faceMask1) ensureStepComputed(3);
         syncViewportScene();
         renderStageToolbar();
       });
@@ -2148,7 +2417,10 @@
     document.getElementById('btnSbPrecision1')?.addEventListener('click', togglePrecisionCut);
     document.getElementById('btnSbUndo1')?.addEventListener('click', undoCutAction);
     document.getElementById('sbSmoothCut1')?.addEventListener('click', smoothStep1Selection);
-    document.getElementById('sbImportImg1')?.addEventListener('click', () => fileInputImg1.click());
+    document.getElementById('sbImportImg1')?.addEventListener('click', () => {
+      if (isLowMemMobile()) pruneMemoryForStep(state.activeStep);
+      fileInputImg1.click();
+    });
     document.getElementById('sbPasteImg1')?.addEventListener('click', () => triggerClipboardPaste(1));
     document.getElementById('btnAutoSelectFace')?.addEventListener('click', openAutoSelectModal);
     document.getElementById('sbFlipRole1')?.addEventListener('click', flipCorpoAndFaceRole);
@@ -2197,9 +2469,7 @@
       if (!state.faceMask1) {
         showToast('Dica: desenhe o corte na imagem1 agora ou volte depois — ela sincroniza automaticamente!');
       }
-      state.activeStep = 2;
-      ensureStepComputed(2);
-      syncAllUI();
+      navigateToStep(2);
     });
   }
 
@@ -2380,7 +2650,10 @@
       </button>
     `;
 
-    document.getElementById('sbImportImg2')?.addEventListener('click', () => fileInputImg2.click());
+    document.getElementById('sbImportImg2')?.addEventListener('click', () => {
+      if (isLowMemMobile()) pruneMemoryForStep(state.activeStep);
+      fileInputImg2.click();
+    });
     document.getElementById('sbPasteImg2')?.addEventListener('click', () => triggerClipboardPaste(2));
     document.getElementById('sbFlipRole2')?.addEventListener('click', flipCorpoAndFaceRole);
 
@@ -2597,9 +2870,7 @@
     bindCopyDownload('copyImg2Pad', 'dlImg2Pad', () => state.img2AlignedCanvas, 'imagem2_padding_alinhada.png');
 
     document.getElementById('sbNextTo3')?.addEventListener('click', () => {
-      state.activeStep = 3;
-      ensureStepComputed(3);
-      syncAllUI();
+      navigateToStep(3);
     });
   }
 
@@ -2805,9 +3076,7 @@
     );
 
     document.getElementById('sbNextTo4')?.addEventListener('click', () => {
-      state.activeStep = 4;
-      ensureStepComputed(4);
-      syncAllUI();
+      navigateToStep(4);
     });
   }
 
@@ -2905,7 +3174,7 @@
         </div>
       </div>
 
-      <button class="btn btn-emerald btn-block" id="sbNextTo5" ${!state.imgFinalCanvas ? 'disabled' : ''}>
+      <button class="btn btn-emerald btn-block" id="sbNextTo5" ${!(state.facePrecisaCanvas && state.corpoSemBordasCanvas) ? 'disabled' : ''}>
         ✨ Ver imagemFinal (União Completa) →
       </button>
     `;
@@ -2921,7 +3190,10 @@
       }
     });
 
-    document.getElementById('sbImportRefined')?.addEventListener('click', () => fileInputRefined.click());
+    document.getElementById('sbImportRefined')?.addEventListener('click', () => {
+      if (isLowMemMobile()) pruneMemoryForStep(state.activeStep);
+      fileInputRefined.click();
+    });
     document.getElementById('sbPasteRefined')?.addEventListener('click', () => triggerClipboardPaste(4));
 
     document.getElementById('segRefFull')?.addEventListener('click', () => {
@@ -3069,9 +3341,7 @@
     bindCopyDownload('copyFacePrec', 'dlFacePrec', () => state.facePrecisaCanvas, 'face_mais_bordas_precisas.png');
 
     document.getElementById('sbNextTo5')?.addEventListener('click', () => {
-      state.activeStep = 5;
-      ensureStepComputed(5);
-      syncAllUI();
+      navigateToStep(5);
     });
   }
 
@@ -3230,9 +3500,7 @@
     bindCopyDownload('copyImgFinal', 'dlImgFinal', () => state.imgFinalCanvas, 'imagemFinal.png');
 
     document.getElementById('sbNextTo6')?.addEventListener('click', () => {
-      state.activeStep = 6;
-      ensureStepComputed(6);
-      syncAllUI();
+      navigateToStep(6);
     });
 
     document.querySelectorAll('#techGrid .tech-btn').forEach((btn) => {
@@ -3314,6 +3582,7 @@
     });
     document.getElementById('segCmpMerge')?.addEventListener('click', () => {
       state.step5View = 'compare-merge';
+      if (!state.imgMergeCanvas && state.img2 && state.faceMask1) ensureStepComputed(3);
       syncAllUI();
     });
     document.getElementById('segCmpImg1')?.addEventListener('click', () => {
@@ -4024,7 +4293,7 @@
 
   async function triggerClipboardPaste(slot) {
     try {
-      const loaded = await Ops.readImageFromClipboardAPI();
+      const loaded = await Ops.readImageFromClipboardAPI(getImportLoadOptions());
       if (!loaded) {
         showToast('Nenhuma imagem encontrada na área de transferência. Use Ctrl+V!', true);
         return;
@@ -4202,7 +4471,7 @@
     try {
       showToast('Analisando imagens...');
       if (files.length === 1 && state.img1) {
-        const loadedFace = await Ops.loadImageFromBlob(files[0], files[0].name);
+        const loadedFace = await Ops.loadImageFromBlob(files[0], files[0].name, getImportLoadOptions());
         autoModalState.imgComplete = state.img1;
         autoModalState.imgFace = loadedFace;
         updateAutoModalUI();
@@ -4215,8 +4484,9 @@
         return;
       }
 
-      const loadedA = await Ops.loadImageFromBlob(files[0], files[0].name);
-      const loadedB = await Ops.loadImageFromBlob(files[1], files[1].name);
+      const loadOpts = getImportLoadOptions();
+      const loadedA = await Ops.loadImageFromBlob(files[0], files[0].name, loadOpts);
+      const loadedB = await Ops.loadImageFromBlob(files[1], files[1].name, loadOpts);
 
       const aHasAlpha = checkImageHasAlpha(loadedA);
       const bHasAlpha = checkImageHasAlpha(loadedB);
@@ -4318,7 +4588,11 @@
       const file = /** @type {HTMLInputElement} */ (e.target).files?.[0];
       if (file) {
         try {
-          autoModalState.imgComplete = await Ops.loadImageFromBlob(file, file.name);
+          autoModalState.imgComplete = await Ops.loadImageFromBlob(
+            file,
+            file.name,
+            getImportLoadOptions()
+          );
           updateAutoModalUI();
         } catch (err) {
           showToast(err.message || 'Erro ao carregar imagem.', true);
@@ -4328,7 +4602,7 @@
 
     btnPasteImg1?.addEventListener('click', async () => {
       try {
-        const loaded = await Ops.readImageFromClipboardAPI();
+        const loaded = await Ops.readImageFromClipboardAPI(getImportLoadOptions());
         if (loaded) {
           autoModalState.imgComplete = loaded;
           updateAutoModalUI();
@@ -4352,7 +4626,11 @@
       const file = /** @type {HTMLInputElement} */ (e.target).files?.[0];
       if (file) {
         try {
-          autoModalState.imgFace = await Ops.loadImageFromBlob(file, file.name);
+          autoModalState.imgFace = await Ops.loadImageFromBlob(
+            file,
+            file.name,
+            getImportLoadOptions()
+          );
           updateAutoModalUI();
         } catch (err) {
           showToast(err.message || 'Erro ao carregar rosto.', true);
@@ -4362,7 +4640,7 @@
 
     btnPasteFace?.addEventListener('click', async () => {
       try {
-        const loaded = await Ops.readImageFromClipboardAPI();
+        const loaded = await Ops.readImageFromClipboardAPI(getImportLoadOptions());
         if (loaded) {
           autoModalState.imgFace = loaded;
           updateAutoModalUI();
@@ -4723,34 +5001,48 @@
   }
 
   /**
-   * Encodes a LoadedImage into a cached PNG blob without retaining temp canvases in RAM.
-   * @param {LoadedImage & { _cachedBlob?: Blob }} loaded
-   * @returns {Promise<Blob | null>}
+   * Returns iOS-safe `{ data: ArrayBuffer, type }` bytes for a LoadedImage without allocating
+   * temp canvases whenever original bytes were already captured during import.
+   * @param {LoadedImage} loaded
+   * @returns {Promise<{ data: ArrayBuffer, type: string } | null>}
    */
-  async function loadedToBlobCached(loaded) {
-    if (!loaded || !loaded.img) return null;
-    if (loaded._cachedBlob) return loaded._cachedBlob;
-    if (!Storage) return null;
-    const tmp = Ops.sourceToCanvas(loaded.img);
-    const blob = await Storage.canvasToBlob(tmp, 'image/png');
+  async function loadedToStoredBytesCached(loaded) {
+    if (!loaded || !loaded.img || !Storage) return null;
+    if (loaded._diskBytes && loaded._diskBytes.data && loaded._diskBytes.data.byteLength > 0) {
+      return loaded._diskBytes;
+    }
+    if (loaded._cachedBlob && loaded._cachedBlob.size > 0) {
+      const bytes = await Storage.blobToStoredBytes(loaded._cachedBlob);
+      if (bytes) {
+        loaded._diskBytes = bytes;
+        return bytes;
+      }
+    }
+    const tmp =
+      loaded.img instanceof HTMLCanvasElement ? loaded.img : Ops.sourceToCanvas(loaded.img);
+    const encodeType = loaded.img instanceof HTMLCanvasElement ? 'image/png' : 'image/jpeg';
+    const bytes = await Storage.canvasToStoredBytes(tmp, encodeType, 0.93);
     if (tmp !== loaded.img) {
       Ops.releaseCanvas(tmp);
     }
-    if (blob) loaded._cachedBlob = blob;
-    return blob;
+    if (bytes) loaded._diskBytes = bytes;
+    return bytes;
   }
 
   /**
-   * Encodes binary mask Uint8Array to a tiny lossless grayscale PNG blob.
+   * Encodes binary mask Uint8Array to compact lossless PNG bytes `{ data: ArrayBuffer, type }`.
    * @param {Uint8Array} mask
    * @param {number} w
    * @param {number} h
    */
-  async function maskToPngBlob(mask, w, h) {
+  async function maskToStoredBytes(mask, w, h) {
     if (!Storage || !mask) return null;
     const c = Ops.createCanvas(w, h);
     const ctx = c.getContext('2d');
-    if (!ctx) return null;
+    if (!ctx) {
+      Ops.releaseCanvas(c);
+      return null;
+    }
     const imgData = ctx.createImageData(w, h);
     const d = imgData.data;
     for (let i = 0; i < mask.length; i++) {
@@ -4762,18 +5054,22 @@
       d[p4 + 3] = 255;
     }
     ctx.putImageData(imgData, 0, 0);
-    const blob = await Storage.canvasToBlob(c, 'image/png');
+    const bytes = await Storage.canvasToStoredBytes(c, 'image/png');
     Ops.releaseCanvas(c);
-    return blob;
+    return bytes;
   }
 
   let _autoSaveTimer = 0;
-  function scheduleAutoSaveProject() {
+  let _saveInFlight = false;
+  let _savePending = false;
+  let _savePendingSilent = true;
+
+  function scheduleAutoSaveProject(delayMs = 500) {
     if (!state.appSettings.autoSaveHistory || !state.img1Canvas || !Storage) return;
     clearTimeout(_autoSaveTimer);
     _autoSaveTimer = window.setTimeout(() => {
       saveCurrentProjectToDisk(true).catch(() => {});
-    }, 1800);
+    }, Math.max(0, delayMs));
   }
 
   async function saveCurrentProjectToDisk(silent = true) {
@@ -4781,6 +5077,12 @@
       if (!silent) showToast('Importe pelo menos a imagem1 antes de salvar no histórico.', true);
       return false;
     }
+    if (_saveInFlight) {
+      _savePending = true;
+      _savePendingSilent = _savePendingSilent && silent;
+      return true;
+    }
+    _saveInFlight = true;
     try {
       const isCompleted = !!(
         state.imgPostCanvas ||
@@ -4795,16 +5097,25 @@
         state.imgMergeCanvas ||
         state.face1Canvas ||
         state.img1Canvas;
-      const thumbBlob = await Storage.createThumbnailBlob(thumbSrc, 320);
 
-      const img1Blob = await Storage.canvasToBlob(state.img1Canvas, 'image/png');
-      const img2Blob = state.img2 ? await loadedToBlobCached(state.img2) : null;
-      const imgRefinedBlob = state.imgRefined ? await loadedToBlobCached(state.imgRefined) : null;
+      // Sequential encoding keeps mobile peak RAM tiny (never hold 2 temp canvases at once)
+      const thumbBytes = await Storage.createThumbnailStoredBytes(thumbSrc, 320);
+      const img1Bytes = await loadedToStoredBytesCached(state.img1);
+      const img2Bytes = state.img2 ? await loadedToStoredBytesCached(state.img2) : null;
+      const imgRefinedBytes = state.imgRefined
+        ? await loadedToStoredBytesCached(state.imgRefined)
+        : null;
       const finalTarget = state.imgPostCanvas || state.imgFinalCanvas;
-      const finalBlob = finalTarget ? await Storage.canvasToBlob(finalTarget, 'image/png') : null;
-      const mask1Blob =
+      const finalBytes = finalTarget
+        ? await Storage.canvasToStoredBytes(
+            finalTarget,
+            isLowMemMobile() ? 'image/jpeg' : 'image/png',
+            0.94
+          )
+        : null;
+      const mask1Bytes =
         state.selection1 && state.selection1.type === 'auto-face' && state.rawMask1
-          ? await maskToPngBlob(state.rawMask1, state.img1Canvas.width, state.img1Canvas.height)
+          ? await maskToStoredBytes(state.rawMask1, state.img1Canvas.width, state.img1Canvas.height)
           : null;
 
       const metaRecord = {
@@ -4818,9 +5129,10 @@
         updatedAt: Date.now(),
         width: state.img1Canvas.width,
         height: state.img1Canvas.height,
-        thumbBlob,
+        thumbBlob: null,
+        thumbBytes,
         meta: {
-          version: 1,
+          version: 2,
           selection1: state.selection1,
           faceIsOne1: state.faceIsOne1,
           img2Transform: { ...state.img2Transform },
@@ -4846,32 +5158,72 @@
 
       const blobsRecord = {
         id: state.currentProjectId,
-        img1Blob,
-        img2Blob,
-        imgRefinedBlob,
-        finalBlob,
-        mask1Blob,
+        img1Bytes,
+        img2Bytes,
+        imgRefinedBytes,
+        finalBytes,
+        mask1Bytes,
       };
 
       await Storage.saveProject(metaRecord, blobsRecord);
+      try {
+        localStorage.setItem(ACTIVE_PROJECT_KEY, state.currentProjectId);
+      } catch (_) {}
       if (!silent) showToast('Projeto salvo no histórico em disco!');
       return true;
     } catch (err) {
       if (!silent) showToast((err && err.message) || 'Erro ao salvar projeto no disco.', true);
       return false;
+    } finally {
+      _saveInFlight = false;
+      if (_savePending) {
+        const nextSilent = _savePendingSilent;
+        _savePending = false;
+        _savePendingSilent = true;
+        saveCurrentProjectToDisk(nextSilent).catch(() => {});
+      }
     }
   }
 
-  async function openStoredProject(id) {
-    if (!Storage) return;
+  /**
+   * Opens a project saved in IndexedDB (supports both iOS-safe ArrayBuffer records and legacy Blobs).
+   * @param {string} id
+   * @param {{ autoResume?: boolean }} [opts]
+   */
+  async function openStoredProject(id, opts = {}) {
+    if (!Storage) return false;
+    const isAuto = !!opts.autoResume;
     try {
       const rec = await Storage.loadProject(id);
-      if (!rec || !rec.metaRecord || !rec.blobsRecord || !rec.blobsRecord.img1Blob) {
+      if (!rec || !rec.metaRecord || !rec.blobsRecord) {
+        if (isAuto) {
+          try {
+            localStorage.removeItem(ACTIVE_PROJECT_KEY);
+          } catch (_) {}
+          return false;
+        }
         showToast('Não foi possível localizar os arquivos deste projeto.', true);
-        return;
+        return false;
       }
+
       const { metaRecord, blobsRecord } = rec;
       const m = metaRecord.meta || {};
+
+      const img1Entry = blobsRecord.img1Bytes || blobsRecord.img1Blob;
+      const img1Blob = Storage.storedToBlob(img1Entry, 'image/png');
+      if (!img1Blob || img1Blob.size <= 0) {
+        if (isAuto) {
+          try {
+            localStorage.removeItem(ACTIVE_PROJECT_KEY);
+          } catch (_) {}
+          return false;
+        }
+        showToast(
+          'Arquivo da imagem1 ausente ou corrompido (projeto antigo do iOS). Exclua-o no Histórico.',
+          true
+        );
+        return false;
+      }
 
       clearActiveProjectMemory();
 
@@ -4879,8 +5231,10 @@
       state.currentProjectName = metaRecord.name || 'Projeto';
       state.currentProjectCreatedAt = metaRecord.createdAt || Date.now();
 
-      const img1Loaded = await Ops.loadImageFromBlob(blobsRecord.img1Blob, m.img1Name || 'imagem1.png');
-      img1Loaded._cachedBlob = blobsRecord.img1Blob;
+      const img1Loaded = await Ops.loadImageFromBlob(img1Blob, m.img1Name || 'imagem1.png');
+      if (img1Entry && img1Entry.data instanceof ArrayBuffer) {
+        img1Loaded._diskBytes = img1Entry;
+      }
       state.img1 = img1Loaded;
       setStateCanvas('img1Canvas', Ops.sourceToCanvas(img1Loaded.img));
 
@@ -4891,27 +5245,37 @@
       state.faceIsOne1 = m.faceIsOne1 !== undefined ? !!m.faceIsOne1 : true;
       if (state.selection1 && state.selection1.polygon && state.selection1.polygon.length >= 3) {
         state.rawMask1 = Geo.rasterizePolygonMask(state.selection1.polygon, W, H);
-      } else if (blobsRecord.mask1Blob) {
-        const maskImg = await Ops.loadImageFromBlob(blobsRecord.mask1Blob, 'mask.png');
-        const mc = Ops.sourceToCanvas(maskImg.img);
-        const mctx = mc.getContext('2d', { willReadFrequently: true });
-        if (mctx) {
-          const md = mctx.getImageData(0, 0, W, H).data;
-          const arr = new Uint8Array(W * H);
-          for (let i = 0; i < arr.length; i++) arr[i] = md[i * 4] >= 128 ? 1 : 0;
-          state.rawMask1 = arr;
-        }
-        Ops.releaseCanvas(mc);
       } else {
-        state.rawMask1 = null;
+        const maskEntry = blobsRecord.mask1Bytes || blobsRecord.mask1Blob;
+        const maskBlob = Storage.storedToBlob(maskEntry, 'image/png');
+        if (maskBlob && maskBlob.size > 0) {
+          const maskImg = await Ops.loadImageFromBlob(maskBlob, 'mask.png');
+          const mc = Ops.sourceToCanvas(maskImg.img);
+          const mctx = mc.getContext('2d', { willReadFrequently: true });
+          if (mctx) {
+            const md = mctx.getImageData(0, 0, W, H).data;
+            const arr = new Uint8Array(W * H);
+            for (let i = 0; i < arr.length; i++) arr[i] = md[i * 4] >= 128 ? 1 : 0;
+            state.rawMask1 = arr;
+          }
+          Ops.releaseCanvas(mc);
+        } else {
+          state.rawMask1 = null;
+        }
       }
 
-      if (blobsRecord.img2Blob) {
-        const img2Loaded = await Ops.loadImageFromBlob(blobsRecord.img2Blob, m.img2Name || 'imagem2.png');
-        img2Loaded._cachedBlob = blobsRecord.img2Blob;
+      const img2Entry = blobsRecord.img2Bytes || blobsRecord.img2Blob;
+      const img2Blob = Storage.storedToBlob(img2Entry, 'image/png');
+      if (img2Blob && img2Blob.size > 0) {
+        const img2Loaded = await Ops.loadImageFromBlob(img2Blob, m.img2Name || 'imagem2.png');
+        if (img2Entry && img2Entry.data instanceof ArrayBuffer) {
+          img2Loaded._diskBytes = img2Entry;
+        }
         state.img2 = img2Loaded;
       }
-      state.img2Transform = m.img2Transform ? { ...m.img2Transform } : { x: 0, y: 0, scale: 1, rotation: 0 };
+      state.img2Transform = m.img2Transform
+        ? { ...m.img2Transform }
+        : { x: 0, y: 0, scale: 1, rotation: 0 };
       state.img2OnionOpacity = m.img2OnionOpacity ?? 0.35;
       state.mergeRegionMode = m.mergeRegionMode || 'expand';
       state.expandPx = m.expandPx ?? 36;
@@ -4919,7 +5283,11 @@
       state.customFaceIsOne2 = m.customFaceIsOne2 !== undefined ? !!m.customFaceIsOne2 : true;
       state.customExtraExpandPx = m.customExtraExpandPx ?? 0;
 
-      if (state.customSelection2 && state.customSelection2.polygon && state.customSelection2.polygon.length >= 3) {
+      if (
+        state.customSelection2 &&
+        state.customSelection2.polygon &&
+        state.customSelection2.polygon.length >= 3
+      ) {
         state.customRawMask2 = Geo.rasterizePolygonMask(state.customSelection2.polygon, W, H);
         const normC = new Uint8Array(W * H);
         const want = state.customFaceIsOne2 ? 1 : 0;
@@ -4930,15 +5298,18 @@
 
       state.exportCroppedMode = !!m.exportCroppedMode;
       state.refinedTargetMode = m.refinedTargetMode || 'full';
-      state.refinedTransform = m.refinedTransform ? { ...m.refinedTransform } : { x: 0, y: 0, scale: 1 };
+      state.refinedTransform = m.refinedTransform
+        ? { ...m.refinedTransform }
+        : { x: 0, y: 0, scale: 1 };
       state.refinedOnionOpacity = m.refinedOnionOpacity ?? 0.32;
 
-      if (blobsRecord.imgRefinedBlob) {
-        const refLoaded = await Ops.loadImageFromBlob(
-          blobsRecord.imgRefinedBlob,
-          m.refinedName || 'refinada.png'
-        );
-        refLoaded._cachedBlob = blobsRecord.imgRefinedBlob;
+      const refEntry = blobsRecord.imgRefinedBytes || blobsRecord.imgRefinedBlob;
+      const refBlob = Storage.storedToBlob(refEntry, 'image/png');
+      if (refBlob && refBlob.size > 0) {
+        const refLoaded = await Ops.loadImageFromBlob(refBlob, m.refinedName || 'refinada.png');
+        if (refEntry && refEntry.data instanceof ArrayBuffer) {
+          refLoaded._diskBytes = refEntry;
+        }
         state.imgRefined = refLoaded;
       }
 
@@ -4947,18 +5318,38 @@
       state.skinSamplesFace = Array.isArray(m.skinSamplesFace) ? m.skinSamplesFace : [];
       state.skinSamplesBody = Array.isArray(m.skinSamplesBody) ? m.skinSamplesBody : [];
 
+      /** @type {1 | 2 | 3 | 4 | 5 | 6} */
       const targetStep =
-        metaRecord.activeStep >= 1 && metaRecord.activeStep <= 6 ? metaRecord.activeStep : 1;
-      recomputeStep1Outputs(true);
-      ensureStepComputed(targetStep);
-
+        metaRecord.activeStep >= 1 && metaRecord.activeStep <= 6
+          ? /** @type {1|2|3|4|5|6} */ (metaRecord.activeStep)
+          : 1;
       state.activeStep = targetStep;
+      recomputeStep1Outputs(targetStep >= 3, true);
+      ensureStepComputed(targetStep);
+      if (isLowMemMobile()) pruneMemoryForStep(targetStep);
+
+      try {
+        localStorage.setItem(ACTIVE_PROJECT_KEY, state.currentProjectId);
+      } catch (_) {}
+
       viewport.setDocumentSize(W, H, true);
       setActiveView('studio');
       syncAllUI();
-      showToast(`Projeto "${state.currentProjectName}" reaberto do disco!`);
+      showToast(
+        isAuto
+          ? 'Projeto em andamento restaurado automaticamente!'
+          : `Projeto "${state.currentProjectName}" reaberto do disco!`
+      );
+      return true;
     } catch (err) {
+      if (isAuto) {
+        try {
+          localStorage.removeItem(ACTIVE_PROJECT_KEY);
+        } catch (_) {}
+        return false;
+      }
       showToast((err && err.message) || 'Falha ao reabrir projeto.', true);
+      return false;
     }
   }
 
@@ -4993,10 +5384,15 @@
             ${filtered
               .map((p) => {
                 let thumbUrl = '';
-                if (p.thumbBlob) {
-                  thumbUrl = URL.createObjectURL(p.thumbBlob);
-                  historyObjectUrls.push(thumbUrl);
-                }
+                try {
+                  const tBlob = Storage
+                    ? Storage.storedToBlob(p.thumbBytes || p.thumbBlob, 'image/jpeg')
+                    : p.thumbBlob;
+                  if (tBlob && tBlob.size > 0) {
+                    thumbUrl = URL.createObjectURL(tBlob);
+                    historyObjectUrls.push(thumbUrl);
+                  }
+                } catch (_) {}
                 const dateStr = new Date(p.updatedAt || p.createdAt || Date.now()).toLocaleString(
                   'pt-BR',
                   { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }
@@ -5083,17 +5479,29 @@
       btn.addEventListener('click', async () => {
         const id = btn.getAttribute('data-hist-dl');
         if (!id || !Storage) return;
-        const rec = await Storage.loadProject(id);
-        if (!rec || !rec.blobsRecord) return;
-        const blob = rec.blobsRecord.finalBlob || rec.blobsRecord.img1Blob;
-        if (!blob) {
-          showToast('Imagem não encontrada no disco.', true);
-          return;
+        try {
+          const rec = await Storage.loadProject(id);
+          if (!rec || !rec.blobsRecord) {
+            showToast('Projeto não encontrado no disco.', true);
+            return;
+          }
+          const entry =
+            rec.blobsRecord.finalBytes ||
+            rec.blobsRecord.finalBlob ||
+            rec.blobsRecord.img1Bytes ||
+            rec.blobsRecord.img1Blob;
+          const blob = Storage.storedToBlob(entry, 'image/png');
+          if (!blob || blob.size <= 0) {
+            showToast('Imagem não encontrada ou corrompida no disco.', true);
+            return;
+          }
+          const loaded = await Ops.loadImageFromBlob(blob, `${rec.metaRecord.name || 'projeto'}.png`);
+          const c = Ops.sourceToCanvas(loaded.img);
+          await Ops.shareOrDownloadCanvas(c, `${rec.metaRecord.name || 'projeto'}.png`);
+          Ops.releaseCanvas(c);
+        } catch (err) {
+          showToast((err && err.message) || 'Erro ao baixar imagem do histórico.', true);
         }
-        const loaded = await Ops.loadImageFromBlob(blob, `${rec.metaRecord.name || 'projeto'}.png`);
-        const c = Ops.sourceToCanvas(loaded.img);
-        await Ops.shareOrDownloadCanvas(c, `${rec.metaRecord.name || 'projeto'}.png`);
-        Ops.releaseCanvas(c);
       });
     });
 
@@ -5116,6 +5524,11 @@
         if (!id || !Storage) return;
         if (!confirm('Remover este projeto permanentemente do disco?')) return;
         await Storage.deleteProject(id);
+        try {
+          if (localStorage.getItem(ACTIVE_PROJECT_KEY) === id) {
+            localStorage.removeItem(ACTIVE_PROJECT_KEY);
+          }
+        } catch (_) {}
         renderHistoryView();
         showToast('Projeto removido do disco.');
       });
@@ -5202,6 +5615,18 @@
               <input type="checkbox" id="chkSetAutoSave" ${cfg.autoSaveHistory ? 'checked' : ''} />
               <span>Salvar projetos automaticamente no Histórico em disco</span>
             </label>
+            <div class="control-row" style="margin-top:4px">
+              <div class="control-label">
+                <span>Resolução Máxima no Mobile (Anti-Crash)</span>
+                <span class="badge cyan">${Number(cfg.mobileMaxEdge) > 0 ? `${cfg.mobileMaxEdge} px` : 'Original'}</span>
+              </div>
+              <select id="selSetMobileMaxEdge" class="input-select">
+                <option value="1600" ${Number(cfg.mobileMaxEdge) === 1600 ? 'selected' : ''}>1600 px — Ultra leve (iPhone/Mobile)</option>
+                <option value="2048" ${Number(cfg.mobileMaxEdge ?? 2048) === 2048 ? 'selected' : ''}>2048 px — Recomendado Mobile</option>
+                <option value="2560" ${Number(cfg.mobileMaxEdge) === 2560 ? 'selected' : ''}>2560 px — Alta definição</option>
+                <option value="0" ${Number(cfg.mobileMaxEdge) === 0 ? 'selected' : ''}>Original — Sem redução (maior uso de RAM)</option>
+              </select>
+            </div>
             <div style="display:flex;flex-direction:column;gap:5px;margin-top:4px">
               <div class="control-label">
                 <span>Uso estimado em disco (IndexedDB)</span>
@@ -5279,6 +5704,21 @@
       if (Storage) Storage.saveSettings(state.appSettings).catch(() => {});
     });
 
+    const selMobileMax = /** @type {HTMLSelectElement | null} */ (
+      document.getElementById('selSetMobileMaxEdge')
+    );
+    selMobileMax?.addEventListener('change', () => {
+      state.appSettings.mobileMaxEdge = Number(selMobileMax.value) || 0;
+      state.appSettings.settingsVersion = 3;
+      if (Storage) Storage.saveSettings(state.appSettings).catch(() => {});
+      renderSettingsView();
+      showToast(
+        state.appSettings.mobileMaxEdge > 0
+          ? `Limite mobile ajustado para ${state.appSettings.mobileMaxEdge} px.`
+          : 'Modo Original ativado para importações.'
+      );
+    });
+
     document.getElementById('btnSetFreeRam')?.addEventListener('click', () => {
       const count = freeInactiveMemory();
       showToast(
@@ -5292,6 +5732,9 @@
       if (!Storage) return;
       if (!confirm('Apagar TODOS os projetos salvos no histórico em disco?')) return;
       await Storage.clearAllProjects();
+      try {
+        localStorage.removeItem(ACTIVE_PROJECT_KEY);
+      } catch (_) {}
       renderSettingsView();
       showToast('Histórico em disco apagado com sucesso.');
     });
@@ -5397,6 +5840,9 @@
     if (state.img1 && state.appSettings.autoSaveHistory) {
       await saveCurrentProjectToDisk(true);
     }
+    try {
+      localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    } catch (_) {}
     clearActiveProjectMemory();
     state.currentProjectId = generateProjectId();
     state.currentProjectName = '';
@@ -5506,7 +5952,13 @@
   btnViewHistory?.addEventListener('click', () => setActiveView('history'));
   btnViewSettings?.addEventListener('click', () => setActiveView('settings'));
 
-  // Flush unsaved project cleanly when leaving/hiding tab
+  // Flush unsaved project cleanly when leaving/hiding tab or switching to external AI app
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && state.appSettings.autoSaveHistory && state.img1Canvas) {
+      saveCurrentProjectToDisk(true).catch(() => {});
+    }
+  });
+
   window.addEventListener('pagehide', () => {
     if (state.appSettings.autoSaveHistory && state.img1Canvas) {
       saveCurrentProjectToDisk(true).catch(() => {});
@@ -5524,12 +5976,20 @@
     if (Storage) {
       try {
         state.appSettings = await Storage.loadSettings(DEFAULT_SETTINGS);
+        let needsMigrateSave = false;
         if (
           !state.appSettings.settingsVersion &&
           Math.abs((state.appSettings.precisionSensitivity || 0) - 0.35) < 0.01
         ) {
           state.appSettings.precisionSensitivity = 0.52;
-          state.appSettings.settingsVersion = 2;
+          needsMigrateSave = true;
+        }
+        if (state.appSettings.mobileMaxEdge === undefined) {
+          state.appSettings.mobileMaxEdge = DEFAULT_SETTINGS.mobileMaxEdge;
+          needsMigrateSave = true;
+        }
+        if (needsMigrateSave || (state.appSettings.settingsVersion || 0) < 3) {
+          state.appSettings.settingsVersion = 3;
           Storage.saveSettings(state.appSettings).catch(() => {});
         }
       } catch (_) {
@@ -5555,6 +6015,14 @@
       const validStep =
         reqStep >= 1 && reqStep <= 6 ? /** @type {1|2|3|4|5|6} */ (reqStep) : 1;
       loadDemoProject(validStep, urlParams.get('view') === 'compare');
+    } else if (Storage && state.appSettings.autoSaveHistory) {
+      let lastActiveId = null;
+      try {
+        lastActiveId = localStorage.getItem(ACTIVE_PROJECT_KEY);
+      } catch (_) {}
+      if (lastActiveId) {
+        await openStoredProject(lastActiveId, { autoResume: true });
+      }
     }
   })();
 })();

@@ -14,6 +14,8 @@
   /** @type {Promise<IDBDatabase> | null} */
   let dbPromise = null;
   let persistRequested = false;
+  /** @type {Promise<any>} */
+  let writeQueue = Promise.resolve();
 
   /**
    * Opens (and caches) the IndexedDB connection cleanly.
@@ -123,6 +125,100 @@
   }
 
   /**
+   * Converts a Blob to an iOS-safe `{ data: ArrayBuffer, type: string }` record.
+   * Raw Blob instances stored in iOS Safari IndexedDB frequently become unreadable across reloads.
+   * @param {Blob | null | undefined} blob
+   * @returns {Promise<{ data: ArrayBuffer, type: string } | null>}
+   */
+  async function blobToStoredBytes(blob) {
+    if (!blob || !(blob instanceof Blob) || blob.size <= 0) return null;
+    try {
+      if (typeof blob.arrayBuffer === 'function') {
+        const buf = await blob.arrayBuffer();
+        if (!buf || buf.byteLength <= 0) return null;
+        return { data: buf, type: blob.type || 'image/png' };
+      }
+    } catch (_) {}
+
+    return new Promise((resolve) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const buf = /** @type {ArrayBuffer | null} */ (reader.result);
+          if (buf && buf instanceof ArrayBuffer && buf.byteLength > 0) {
+            resolve({ data: buf, type: blob.type || 'image/png' });
+          } else {
+            resolve(null);
+          }
+        };
+        reader.onerror = () => resolve(null);
+        reader.readAsArrayBuffer(blob);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * Normalizes `{ data: ArrayBuffer | Uint8Array, type }` OR a legacy `Blob` into a valid `Blob | null`.
+   * @param {any} entry
+   * @param {string} [fallbackType='image/png']
+   * @returns {Blob | null}
+   */
+  function storedToBlob(entry, fallbackType = 'image/png') {
+    if (!entry) return null;
+    if (entry instanceof Blob) {
+      return entry.size > 0 ? entry : null;
+    }
+    if (entry instanceof ArrayBuffer) {
+      return entry.byteLength > 0 ? new Blob([entry], { type: fallbackType }) : null;
+    }
+    if (ArrayBuffer.isView(entry)) {
+      if (entry.byteLength <= 0) return null;
+      const sliced = entry.buffer.slice(entry.byteOffset, entry.byteOffset + entry.byteLength);
+      return new Blob([sliced], { type: fallbackType });
+    }
+    if (typeof entry === 'object' && entry.data) {
+      const mime = entry.type || fallbackType;
+      if (entry.data instanceof ArrayBuffer) {
+        return entry.data.byteLength > 0 ? new Blob([entry.data], { type: mime }) : null;
+      }
+      if (ArrayBuffer.isView(entry.data)) {
+        if (entry.data.byteLength <= 0) return null;
+        const sliced = entry.data.buffer.slice(
+          entry.data.byteOffset,
+          entry.data.byteOffset + entry.data.byteLength
+        );
+        return new Blob([sliced], { type: mime });
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Encodes an HTMLCanvasElement as iOS-safe `{ data: ArrayBuffer, type }` bytes.
+   * @param {HTMLCanvasElement | null | undefined} canvas
+   * @param {string} [type='image/png']
+   * @param {number} [quality=0.92]
+   * @returns {Promise<{ data: ArrayBuffer, type: string } | null>}
+   */
+  async function canvasToStoredBytes(canvas, type = 'image/png', quality = 0.92) {
+    const blob = await canvasToBlob(canvas, type, quality);
+    return blobToStoredBytes(blob);
+  }
+
+  /**
+   * Creates a compact JPEG thumbnail stored as `{ data: ArrayBuffer, type: 'image/jpeg' }`.
+   * @param {HTMLCanvasElement | null | undefined} canvas
+   * @param {number} [maxSide=320]
+   * @returns {Promise<{ data: ArrayBuffer, type: string } | null>}
+   */
+  async function createThumbnailStoredBytes(canvas, maxSide = 320) {
+    const blob = await createThumbnailBlob(canvas, maxSide);
+    return blobToStoredBytes(blob);
+  }
+
+  /**
    * Loads persisted app settings from IndexedDB, merged cleanly with defaults.
    * @param {AppSettings} defaults
    * @returns {Promise<AppSettings>}
@@ -176,21 +272,50 @@
   }
 
   /**
-   * Saves project metadata and heavy image blobs atomically on disk.
+   * Saves project metadata and heavy image payloads atomically on disk, serialized via writeQueue.
    * @param {StoredProjectMeta} metaRecord
-   * @param {{ id: string, img1Blob?: Blob | null, img2Blob?: Blob | null, imgRefinedBlob?: Blob | null, finalBlob?: Blob | null }} blobsRecord
+   * @param {any} blobsRecord
    * @returns {Promise<boolean>}
    */
-  async function saveProject(metaRecord, blobsRecord) {
-    const db = await openDB();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction([STORE_PROJECTS, STORE_BLOBS], 'readwrite');
-      tx.objectStore(STORE_PROJECTS).put(metaRecord);
-      tx.objectStore(STORE_BLOBS).put(blobsRecord);
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => reject(tx.error || new Error('Erro ao gravar projeto no disco.'));
-    });
-    return true;
+  function saveProject(metaRecord, blobsRecord) {
+    const run = async () => {
+      const db = await openDB();
+      await new Promise((resolve, reject) => {
+        try {
+          const tx = db.transaction([STORE_PROJECTS, STORE_BLOBS], 'readwrite');
+          tx.objectStore(STORE_PROJECTS).put(metaRecord);
+          tx.objectStore(STORE_BLOBS).put(blobsRecord);
+          tx.oncomplete = () => resolve(true);
+          tx.onabort = () => {
+            const err = tx.error;
+            if (err && err.name === 'QuotaExceededError') {
+              reject(new Error('Espaço em disco insuficiente. Apague projetos antigos no Histórico.'));
+            } else {
+              reject(err || new Error('Transação abortada ao gravar projeto no disco.'));
+            }
+          };
+          tx.onerror = () => {
+            const err = tx.error;
+            if (err && err.name === 'QuotaExceededError') {
+              reject(new Error('Espaço em disco insuficiente. Apague projetos antigos no Histórico.'));
+            } else {
+              reject(err || new Error('Erro ao gravar projeto no disco.'));
+            }
+          };
+        } catch (err) {
+          if (err && err.name === 'QuotaExceededError') {
+            reject(new Error('Espaço em disco insuficiente. Apague projetos antigos no Histórico.'));
+          } else {
+            reject(err);
+          }
+        }
+      });
+      return true;
+    };
+
+    const next = writeQueue.then(run, run);
+    writeQueue = next.catch(() => {});
+    return next;
   }
 
   /**
@@ -319,6 +444,10 @@
     openDB,
     canvasToBlob,
     createThumbnailBlob,
+    blobToStoredBytes,
+    storedToBlob,
+    canvasToStoredBytes,
+    createThumbnailStoredBytes,
     loadSettings,
     saveSettings,
     saveProject,

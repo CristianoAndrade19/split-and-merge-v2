@@ -1453,6 +1453,28 @@ input[type='range'] {
   gap: 8px;
 }
 
+.input-select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+}
+
+.input-select:focus {
+  border-color: var(--accent-cyan);
+}
+
+.input-select option {
+  background: var(--bg-panel);
+  color: var(--text-main);
+}
+
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));

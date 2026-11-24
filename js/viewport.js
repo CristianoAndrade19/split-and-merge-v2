@@ -1051,7 +1051,8 @@
       // Subtle dot grid outside image so user perceives camera pan & outer margin clearly
       this._drawWorkspaceGrid(ctx, vw, vh);
 
-      if (this.docW <= 0 || this.docH <= 0 || !this.renderState.primaryCanvas) {
+      const primary = this.renderState.primaryCanvas;
+      if (this.docW <= 0 || this.docH <= 0 || !primary || !primary.width || !primary.height) {
         this._drawEmptyState(ctx, vw, vh);
         ctx.restore();
         return;
@@ -1086,7 +1087,8 @@
       ctx.imageSmoothingQuality = 'high';
 
       // Primary image OR Before/After Split Comparison
-      if (this.mode === 'compare' && this.renderState.compareBeforeCanvas) {
+      const cmpBefore = this.renderState.compareBeforeCanvas;
+      if (this.mode === 'compare' && cmpBefore && cmpBefore.width > 0 && cmpBefore.height > 0) {
         const splitX = this.docW * this.renderState.compareRatio;
         // Draw After (imagemFinal) full
         ctx.drawImage(this.renderState.primaryCanvas, 0, 0, this.docW, this.docH);
@@ -1095,23 +1097,25 @@
         ctx.beginPath();
         ctx.rect(0, 0, splitX, this.docH);
         ctx.clip();
-        ctx.drawImage(this.renderState.compareBeforeCanvas, 0, 0, this.docW, this.docH);
+        ctx.drawImage(cmpBefore, 0, 0, this.docW, this.docH);
         ctx.restore();
       } else {
         ctx.drawImage(this.renderState.primaryCanvas, 0, 0, this.docW, this.docH);
       }
 
       // Optional Onion Skin reference (e.g. imagem1 under/over imagem2 while aligning)
-      if (this.renderState.onionCanvas && this.renderState.onionOpacity > 0.005) {
+      const onion = this.renderState.onionCanvas;
+      if (onion && onion.width > 0 && onion.height > 0 && this.renderState.onionOpacity > 0.005) {
         ctx.save();
         ctx.globalAlpha = Math.max(0, Math.min(1, this.renderState.onionOpacity));
-        ctx.drawImage(this.renderState.onionCanvas, 0, 0, this.docW, this.docH);
+        ctx.drawImage(onion, 0, 0, this.docW, this.docH);
         ctx.restore();
       }
 
       // Mask tint & crisp seam contour overlay
-      if (this.renderState.showMaskOverlay && this.renderState.maskOverlayCanvas) {
-        ctx.drawImage(this.renderState.maskOverlayCanvas, 0, 0, this.docW, this.docH);
+      const maskOv = this.renderState.maskOverlayCanvas;
+      if (this.renderState.showMaskOverlay && maskOv && maskOv.width > 0 && maskOv.height > 0) {
+        ctx.drawImage(maskOv, 0, 0, this.docW, this.docH);
       }
 
       ctx.restore(); // Back to screen coordinates for crisp 1px UI lines, handles & labels!
@@ -1629,7 +1633,7 @@
     _drawPrecisionLoupe(ctx, vw, vh) {
       const cur = this.precisionCursorImg;
       const primary = this.renderState.primaryCanvas;
-      if (!cur || !primary) return;
+      if (!cur || !primary || !primary.width || !primary.height) return;
 
       const sp = this.imageToScreen(cur.x, cur.y);
       const diam = this.loupeSize || 132;
@@ -1702,8 +1706,9 @@
       ctx.fillStyle = '#121722';
       ctx.fillRect(0, 0, this.docW, this.docH);
       ctx.drawImage(primary, 0, 0, this.docW, this.docH);
-      if (this.renderState.showMaskOverlay && this.renderState.maskOverlayCanvas) {
-        ctx.drawImage(this.renderState.maskOverlayCanvas, 0, 0, this.docW, this.docH);
+      const loupeMask = this.renderState.maskOverlayCanvas;
+      if (this.renderState.showMaskOverlay && loupeMask && loupeMask.width > 0 && loupeMask.height > 0) {
+        ctx.drawImage(loupeMask, 0, 0, this.docW, this.docH);
       }
 
       // Crisp border outline of document inside loupe

@@ -33,28 +33,88 @@
   }
 
   /**
-   * Loads an image File/Blob into a clean HTMLImageElement via FileReader DataURL
-   * (never taints Canvas even when index.html is opened directly over file://).
-   *
-   * @param {Blob} blob
-   * @param {string} [name]
-   * @returns {Promise<LoadedImage>}
+   * Extracts raw ArrayBuffer + MIME cleanly from a Blob without allocating any canvas or DataURL.
+   * @param {Blob} b
+   * @returns {Promise<{ data: ArrayBuffer, type: string } | null>}
    */
-  function loadImageFromBlob(blob, name = 'imagem.png') {
+  async function blobToBytesFast(b) {
+    if (!b || b.size <= 0) return null;
+    try {
+      if (typeof b.arrayBuffer === 'function') {
+        const buf = await b.arrayBuffer();
+        if (buf && buf.byteLength > 0) {
+          return { data: buf, type: b.type || 'image/png' };
+        }
+      }
+    } catch (_) {}
+    return new Promise((resolve) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const buf = /** @type {ArrayBuffer | null} */ (reader.result);
+          resolve(
+            buf && buf instanceof ArrayBuffer && buf.byteLength > 0
+              ? { data: buf, type: b.type || 'image/png' }
+              : null
+          );
+        };
+        reader.onerror = () => resolve(null);
+        reader.readAsArrayBuffer(b);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * Decodes a Blob into an HTMLImageElement cleanly using ObjectURL (low RAM) on HTTP/HTTPS,
+   * falling back to FileReader DataURL on file:// to keep canvas untainted.
+   * @param {Blob} blob
+   * @returns {Promise<HTMLImageElement>}
+   */
+  function decodeBlobToImage(blob) {
     return new Promise((resolve, reject) => {
+      const canUseObjectUrl =
+        typeof URL !== 'undefined' &&
+        typeof URL.createObjectURL === 'function' &&
+        typeof window !== 'undefined' &&
+        window.location &&
+        window.location.protocol !== 'file:';
+
+      if (canUseObjectUrl) {
+        let objUrl = '';
+        try {
+          objUrl = URL.createObjectURL(blob);
+          const img = new Image();
+          img.onload = () => {
+            try {
+              URL.revokeObjectURL(objUrl);
+            } catch (_) {}
+            resolve(img);
+          };
+          img.onerror = () => {
+            try {
+              URL.revokeObjectURL(objUrl);
+            } catch (_) {}
+            reject(new Error('Formato de imagem inválido ou não suportado.'));
+          };
+          img.src = objUrl;
+          return;
+        } catch (_) {
+          if (objUrl) {
+            try {
+              URL.revokeObjectURL(objUrl);
+            } catch (_) {}
+          }
+        }
+      }
+
       const reader = new FileReader();
       reader.onerror = () => reject(new Error('Falha ao ler arquivo de imagem.'));
       reader.onload = () => {
         const dataUrl = /** @type {string} */ (reader.result);
         const img = new Image();
-        img.onload = () => {
-          resolve({
-            img,
-            width: img.naturalWidth || img.width,
-            height: img.naturalHeight || img.height,
-            name,
-          });
-        };
+        img.onload = () => resolve(img);
         img.onerror = () => reject(new Error('Formato de imagem inválido ou não suportado.'));
         img.src = dataUrl;
       };
@@ -63,11 +123,116 @@
   }
 
   /**
+   * Loads an image File/Blob into a clean HTMLImageElement, with optional mobile maxEdge
+   * downscaling and cached disk bytes to keep mobile Safari memory low.
+   *
+   * @param {Blob} blob
+   * @param {string} [name]
+   * @param {{ maxEdge?: number }} [opts]
+   * @returns {Promise<LoadedImage>}
+   */
+  async function loadImageFromBlob(blob, name = 'imagem.png', opts = {}) {
+    if (!blob || !(blob instanceof Blob) || blob.size <= 0) {
+      throw new Error('Arquivo de imagem vazio ou corrompido.');
+    }
+
+    const img = await decodeBlobToImage(blob);
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    const maxEdge = opts && Number(opts.maxEdge) > 0 ? Number(opts.maxEdge) : 0;
+
+    if (maxEdge > 0 && Math.max(w, h) > maxEdge) {
+      const scale = maxEdge / Math.max(w, h);
+      const tw = Math.max(1, Math.round(w * scale));
+      const th = Math.max(1, Math.round(h * scale));
+      const c = createCanvas(tw, th);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.clearRect(0, 0, tw, th);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, tw, th);
+      }
+
+      // Free the huge decoded bitmap immediately on WebKit/Safari
+      try {
+        img.src = '';
+      } catch (_) {}
+
+      let hasAlpha = false;
+      if (ctx && (blob.type === 'image/png' || blob.type === 'image/webp' || !blob.type)) {
+        try {
+          const data = ctx.getImageData(0, 0, tw, th).data;
+          const stride = 64; // sample every 16 pixels (16 * 4 bytes)
+          for (let i = 3; i < data.length; i += stride) {
+            if (data[i] < 252) {
+              hasAlpha = true;
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+
+      const outType = hasAlpha ? 'image/png' : 'image/jpeg';
+      const outQuality = hasAlpha ? undefined : 0.93;
+      const smallBlob = await new Promise((resolve) => {
+        try {
+          c.toBlob((b) => resolve(b || null), outType, outQuality);
+        } catch (_) {
+          resolve(null);
+        }
+      });
+      releaseCanvas(c);
+
+      if (smallBlob && smallBlob.size > 0) {
+        const smallImg = await decodeBlobToImage(smallBlob);
+        const _diskBytes = await blobToBytesFast(smallBlob);
+        return {
+          img: smallImg,
+          width: smallImg.naturalWidth || smallImg.width || tw,
+          height: smallImg.naturalHeight || smallImg.height || th,
+          name,
+          _diskBytes,
+          _wasDownscaled: true,
+          _origWidth: w,
+          _origHeight: h,
+        };
+      }
+      // Fallback if toBlob returned null unexpectedly
+      const redecoded = await decodeBlobToImage(blob);
+      const _diskBytes = await blobToBytesFast(blob);
+      return {
+        img: redecoded,
+        width: w,
+        height: h,
+        name,
+        _diskBytes,
+        _wasDownscaled: false,
+        _origWidth: w,
+        _origHeight: h,
+      };
+    }
+
+    const _diskBytes = await blobToBytesFast(blob);
+    return {
+      img,
+      width: w,
+      height: h,
+      name,
+      _diskBytes,
+      _wasDownscaled: false,
+      _origWidth: w,
+      _origHeight: h,
+    };
+  }
+
+  /**
    * Extracts an image Blob from a ClipboardEvent if present.
    * @param {ClipboardEvent} e
+   * @param {{ maxEdge?: number }} [opts]
    * @returns {Promise<LoadedImage | null>}
    */
-  async function extractImageFromPasteEvent(e) {
+  async function extractImageFromPasteEvent(e, opts = {}) {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return null;
     for (let i = 0; i < items.length; i++) {
@@ -75,7 +240,7 @@
       if (item.type && item.type.startsWith('image/')) {
         const file = item.getAsFile();
         if (file) {
-          return loadImageFromBlob(file, `colado_${Date.now()}.png`);
+          return loadImageFromBlob(file, `colado_${Date.now()}.png`, opts);
         }
       }
     }
@@ -84,9 +249,10 @@
 
   /**
    * Reads an image directly via the Async Clipboard API (when triggered by a button click).
+   * @param {{ maxEdge?: number }} [opts]
    * @returns {Promise<LoadedImage | null>}
    */
-  async function readImageFromClipboardAPI() {
+  async function readImageFromClipboardAPI(opts = {}) {
     if (!navigator.clipboard || !navigator.clipboard.read) {
       throw new Error('Use Ctrl+V para colar diretamente neste navegador.');
     }
@@ -95,7 +261,7 @@
       const imgType = item.types.find((t) => t.startsWith('image/'));
       if (imgType) {
         const blob = await item.getType(imgType);
-        return loadImageFromBlob(blob, `colado_${Date.now()}.png`);
+        return loadImageFromBlob(blob, `colado_${Date.now()}.png`, opts);
       }
     }
     return null;
