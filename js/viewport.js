@@ -88,7 +88,7 @@
       this.strokeCheckpoints = [];
       this.strokePaused = false;
       this.precisionMode = false;
-      this.precisionSensitivity = 0.35;
+      this.precisionSensitivity = 0.52;
       this.loupeZoom = 3.0;
       this.loupeSize = 132;
       /** @type {Point | null} */
@@ -121,7 +121,7 @@
     setPrecisionOptions(opts = {}) {
       if (typeof opts.enabled === 'boolean') this.precisionMode = opts.enabled;
       if (opts.sensitivity !== undefined) {
-        this.precisionSensitivity = Math.max(0.12, Math.min(1.0, Number(opts.sensitivity) || 0.35));
+        this.precisionSensitivity = Math.max(0.12, Math.min(1.0, Number(opts.sensitivity) || 0.52));
       }
       if (opts.loupeZoom !== undefined) {
         this.loupeZoom = Math.max(1.5, Math.min(6.0, Number(opts.loupeZoom) || 3.0));

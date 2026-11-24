@@ -25,14 +25,15 @@
     { id: 'obsidian-mono', name: 'Preto + Prata', sub: 'Minimalista Puro', accent: '#f4f4f5', accent2: '#a1a1aa', themeColor: '#000000' },
   ];
 
-  /** @type {AppSettings} */
+  /** @type {AppSettings & { settingsVersion?: number }} */
   const DEFAULT_SETTINGS = {
     theme: 'obsidian-cyan',
     precisionDefaultMobile: true,
-    precisionSensitivity: 0.35,
+    precisionSensitivity: 0.52,
     loupeZoom: 3.0,
     loupeSize: 132,
     autoSaveHistory: true,
+    settingsVersion: 2,
   };
 
   function generateProjectId() {
@@ -521,15 +522,17 @@
   // Toast Notifications
   // ===========================================================================
   function showToast(msg, isError = false) {
+    toastContainer.innerHTML = '';
     const el = document.createElement('div');
     el.className = `toast${isError ? ' error' : ''}`;
     el.textContent = msg;
     toastContainer.appendChild(el);
     setTimeout(() => {
+      if (!el.isConnected) return;
       el.style.opacity = '0';
       el.style.transition = 'opacity 0.25s ease';
       setTimeout(() => el.remove(), 260);
-    }, 3100);
+    }, 2400);
   }
 
   // ===========================================================================
@@ -1040,6 +1043,62 @@
     } else {
       showToast('Nada para desfazer no momento.');
     }
+  }
+
+  function smoothStep1Selection() {
+    if (!state.img1Canvas || !state.rawMask1) {
+      showToast('Faça uma seleção na imagem1 primeiro.', true);
+      return;
+    }
+    const W = state.img1Canvas.width;
+    const H = state.img1Canvas.height;
+
+    state.prevSelection1 = {
+      selection: state.selection1,
+      rawMask: new Uint8Array(state.rawMask1),
+      faceIsOne: state.faceIsOne1,
+    };
+
+    const sel = state.selection1;
+    if (sel && sel.type === 'border-cut' && sel.cutPath && sel.cutPath.length >= 3) {
+      const smoothedCut = Geo.smoothPolyline(sel.cutPath, false, 2);
+      const polygon = Geo.buildBorderCutPolygon(smoothedCut, W, H);
+      if (Geo.polygonArea(polygon) >= 16) {
+        state.selection1 = {
+          type: 'border-cut',
+          polygon,
+          cutPath: smoothedCut,
+          pIn: smoothedCut[0],
+          pOut: smoothedCut[smoothedCut.length - 1],
+        };
+        state.rawMask1 = Geo.rasterizePolygonMask(polygon, W, H);
+      }
+    } else if (sel && sel.type === 'lasso' && sel.polygon && sel.polygon.length >= 4) {
+      let openPts = sel.polygon.slice();
+      if (
+        openPts.length > 3 &&
+        Geo.dist(openPts[0], openPts[openPts.length - 1]) < 1e-2
+      ) {
+        openPts.pop();
+      }
+      const smoothedLoop = Geo.smoothPolyline(openPts, true, 2);
+      const closedPoly = smoothedLoop.concat([{ ...smoothedLoop[0] }]);
+      if (smoothedLoop.length >= 3 && Geo.polygonArea(closedPoly) >= 16) {
+        state.selection1 = {
+          type: 'lasso',
+          polygon: closedPoly,
+          cutPath: closedPoly,
+        };
+        state.rawMask1 = Geo.rasterizePolygonMask(closedPoly, W, H);
+      }
+    } else {
+      state.rawMask1 = Geo.smoothBinaryMask(state.rawMask1, W, H, 4);
+    }
+
+    recomputeStep1Outputs(true);
+    syncAllUI();
+    scheduleAutoSaveProject();
+    showToast('Seleção suavizada (menos quinas)! Clique novamente para suavizar mais.');
   }
 
   function handleViewportTransformChange(tx, ty, scale, rotation, isDragging) {
@@ -1673,7 +1732,6 @@
     if (state.precisionCut && state.activeStep === 1) {
       state.step1Tool = 'cut';
       state.step1View = 'split';
-      if (isMobileLayout() && mobileSheetMode === 'expanded') setMobileSheetState('peek');
     } else if (state.precisionCut && state.activeStep === 3) {
       state.step3Tool = 'cut';
     }
@@ -1714,6 +1772,9 @@
       addPill('🔍 Precisão Lupa', state.precisionCut, togglePrecisionCut);
       if (strokeInfo.active || state.prevSelection1) {
         addPill('↩ Desfazer', false, undoCutAction);
+      }
+      if (state.faceMask1 && !strokeInfo.active) {
+        addPill('〰 Suavizar', false, smoothStep1Selection);
       }
       if (strokeInfo.active && strokeInfo.points >= 3) {
         addPill('✓ Fechar Laço', true, () => viewport.finishPrecisionLasso());
@@ -2042,6 +2103,9 @@
           <button class="btn btn-sm" style="flex:1.4;font-weight:700" id="btnAutoSelectFace" title="Auto selecionar caso já possua imagem completa e rosto já isolado (complemento vira corpo)">
             ✨ Auto Selecionar
           </button>
+          <button class="btn btn-sm" id="sbSmoothCut1" ${!state.faceMask1 ? 'disabled' : ''} title="Suaviza quinas e cantos da seleção atual mantendo bordas">
+            〰 Suavizar
+          </button>
           <button class="btn btn-amber btn-sm" style="flex:1" id="sbFlipRole1" ${!state.faceMask1 ? 'disabled' : ''}>
             ⇄ Inverter
           </button>
@@ -2083,6 +2147,7 @@
 
     document.getElementById('btnSbPrecision1')?.addEventListener('click', togglePrecisionCut);
     document.getElementById('btnSbUndo1')?.addEventListener('click', undoCutAction);
+    document.getElementById('sbSmoothCut1')?.addEventListener('click', smoothStep1Selection);
     document.getElementById('sbImportImg1')?.addEventListener('click', () => fileInputImg1.click());
     document.getElementById('sbPasteImg1')?.addEventListener('click', () => triggerClipboardPaste(1));
     document.getElementById('btnAutoSelectFace')?.addEventListener('click', openAutoSelectModal);
@@ -5111,7 +5176,7 @@
                 <span>Sensibilidade do movimento</span>
                 <span class="control-val" id="valSetSens">${Math.round(cfg.precisionSensitivity * 100)}%</span>
               </div>
-              <input type="range" id="rngSetSens" min="15" max="80" step="5" value="${Math.round(cfg.precisionSensitivity * 100)}" />
+              <input type="range" id="rngSetSens" min="20" max="90" step="5" value="${Math.round(cfg.precisionSensitivity * 100)}" />
             </div>
             <div class="control-row">
               <div class="control-label">
@@ -5185,7 +5250,8 @@
 
     const rngSens = /** @type {HTMLInputElement | null} */ (document.getElementById('rngSetSens'));
     rngSens?.addEventListener('input', () => {
-      state.appSettings.precisionSensitivity = (Number(rngSens.value) || 35) / 100;
+      state.appSettings.precisionSensitivity = (Number(rngSens.value) || 52) / 100;
+      state.appSettings.settingsVersion = 2;
       const lbl = document.getElementById('valSetSens');
       if (lbl) lbl.textContent = `${Math.round(state.appSettings.precisionSensitivity * 100)}%`;
       saveAndSyncViewport();
@@ -5458,6 +5524,14 @@
     if (Storage) {
       try {
         state.appSettings = await Storage.loadSettings(DEFAULT_SETTINGS);
+        if (
+          !state.appSettings.settingsVersion &&
+          Math.abs((state.appSettings.precisionSensitivity || 0) - 0.35) < 0.01
+        ) {
+          state.appSettings.precisionSensitivity = 0.52;
+          state.appSettings.settingsVersion = 2;
+          Storage.saveSettings(state.appSettings).catch(() => {});
+        }
       } catch (_) {
         state.appSettings = { ...DEFAULT_SETTINGS };
       }

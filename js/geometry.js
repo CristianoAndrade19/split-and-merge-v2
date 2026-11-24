@@ -854,6 +854,132 @@
     };
   }
 
+  /**
+   * Smooths a polyline via Chaikin corner-cutting to reduce sharp jagged angles.
+   * Preserves exact start/end points when `closed === false` so border cuts stay anchored.
+   *
+   * @param {Point[]} pts
+   * @param {boolean} [closed=false]
+   * @param {number} [iterations=2]
+   * @returns {Point[]}
+   */
+  function smoothPolyline(pts, closed = false, iterations = 2) {
+    if (!pts || pts.length < 3) return pts ? pts.slice() : [];
+    /** @type {Point[]} */
+    let cur = [{ x: pts[0].x, y: pts[0].y }];
+    for (let i = 1; i < pts.length; i++) {
+      const p = pts[i];
+      if (i === pts.length - 1 || dist(cur[cur.length - 1], p) >= 1.5) {
+        cur.push({ x: p.x, y: p.y });
+      }
+    }
+    if (cur.length < 3) return cur;
+
+    const passes = Math.max(1, Math.min(4, Math.round(iterations)));
+    for (let it = 0; it < passes; it++) {
+      /** @type {Point[]} */
+      const next = [];
+      const len = cur.length;
+      if (closed) {
+        for (let i = 0; i < len; i++) {
+          const a = cur[i];
+          const b = cur[(i + 1) % len];
+          next.push(
+            { x: 0.75 * a.x + 0.25 * b.x, y: 0.75 * a.y + 0.25 * b.y },
+            { x: 0.25 * a.x + 0.75 * b.x, y: 0.25 * a.y + 0.75 * b.y }
+          );
+        }
+      } else {
+        next.push({ x: cur[0].x, y: cur[0].y });
+        for (let i = 0; i < len - 1; i++) {
+          const a = cur[i];
+          const b = cur[i + 1];
+          const q = { x: 0.75 * a.x + 0.25 * b.x, y: 0.75 * a.y + 0.25 * b.y };
+          const r = { x: 0.25 * a.x + 0.75 * b.x, y: 0.25 * a.y + 0.75 * b.y };
+          if (i > 0) next.push(q);
+          if (i < len - 2) next.push(r);
+        }
+        next.push({ x: cur[len - 1].x, y: cur[len - 1].y });
+      }
+
+      // Thin sub-2px segments while preserving endpoints
+      /** @type {Point[]} */
+      const thinned = [next[0]];
+      for (let i = 1; i < next.length; i++) {
+        const isLast = !closed && i === next.length - 1;
+        if (isLast || dist(thinned[thinned.length - 1], next[i]) >= 2.0) {
+          thinned.push(next[i]);
+        }
+      }
+      cur = thinned.length >= 3 ? thinned : next;
+    }
+    return cur;
+  }
+
+  /**
+   * Smooths a binary mask via fast separable 2D box blur + threshold, softening sharp corners.
+   * @param {Uint8Array} mask
+   * @param {number} W
+   * @param {number} H
+   * @param {number} [radius=4]
+   * @returns {Uint8Array}
+   */
+  function smoothBinaryMask(mask, W, H, radius = 4) {
+    const r = Math.max(1, Math.min(14, Math.round(radius)));
+    const n = W * H;
+    const tmp = new Float32Array(n);
+    const out = new Uint8Array(n);
+
+    // Horizontal pass
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      let sum = 0;
+      let cnt = 0;
+      for (let x = 0; x <= Math.min(W - 1, r); x++) {
+        sum += mask[row + x];
+        cnt++;
+      }
+      for (let x = 0; x < W; x++) {
+        tmp[row + x] = sum / Math.max(1, cnt);
+        const addX = x + r + 1;
+        if (addX < W) {
+          sum += mask[row + addX];
+          cnt++;
+        }
+        const remX = x - r;
+        if (remX >= 0) {
+          sum -= mask[row + remX];
+          cnt--;
+        }
+      }
+    }
+
+    // Vertical pass + threshold
+    for (let x = 0; x < W; x++) {
+      let sum = 0;
+      let cnt = 0;
+      for (let y = 0; y <= Math.min(H - 1, r); y++) {
+        sum += tmp[y * W + x];
+        cnt++;
+      }
+      for (let y = 0; y < H; y++) {
+        out[y * W + x] = sum / Math.max(1, cnt) >= 0.5 ? 1 : 0;
+        const addY = y + r + 1;
+        if (addY < H) {
+          sum += tmp[addY * W + x];
+          cnt++;
+        }
+        const remY = y - r;
+        if (remY >= 0) {
+          sum -= tmp[remY * W + x];
+          cnt--;
+        }
+      }
+    }
+
+    return out;
+  }
+
   global.SplitMergeGeometry = {
     dist,
     polylineLength,
@@ -866,6 +992,8 @@
     buildBorderCutPolygon,
     segmentsIntersect,
     analyzeStrokeProgress,
+    smoothPolyline,
+    smoothBinaryMask,
     rasterizePolygonMask,
     guessFaceIsOne,
     matchMaskSideToReference,
